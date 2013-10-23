@@ -92,81 +92,6 @@ def getBuiltinHeaderPath(library_path):
 
   return None
 
-""" BerkeleyDb implementation
-# abstract all the communication to the database so that replacing the underlying DB is easier
-def IndexDbOpen(path, readOnly, create = False):
-    conn = db.DB()
-    conn.open(path, None, db.DB_BTREE, (db.DB_RDONLY if readOnly else 0) or db.DB_CREATE)
-    return conn
-
-def IndexDbRangeIter(conn, startWith = ''):
-    startWith = str(startWith)
-    cursor = conn.cursor()
-    entry = cursor.set_range(startWith)
-    # apparently BerkeleyDB doesn't support iterating in a presense of concurrent deletes, so snapshot the list instead of yielding elements right away
-    ret = []
-    while not entry is None and entry[0].startswith(startWith):
-        ret.append((entry[0], entry[1]))
-        entry = cursor.next()
-    cursor.close()
-    for entry in ret:
-        yield entry
-
-def IndexDbDelete(conn, key):
-    try:
-        conn.delete(key)
-    except db.DBNotFoundError as e:
-        pass
-
-def IndexDbPut(conn, key, value):
-    conn.put(str(key), str(value))
-
-def IndexDbGet(conn, key, default=None):
-    if not default is None:
-        default = str(default)
-    return conn.get(str(key), default=default)
-"""
-
-""" SQLLite implementation
-# abstract all the communication to the database so that replacing the underlying DB is easier
-def IndexDbOpen(path, readOnly, create = False):
-    conn = sqlite3.connect(path)
-    if create:
-        c = conn.cursor()
-        c.execute("CREATE TABLE IF NOT EXISTS symbols(key text, value text, PRIMARY KEY(key))")
-        conn.commit()
-    return conn
-
-def IndexDbRangeIter(conn, startWith = None):
-    c = conn.cursor()
-    if startWith == None:
-        res = c.execute("SELECT * FROM symbols");
-    else:
-        assert startWith[-1] == '%'
-        firstExcl = startWith[:-1] + '^'
-        res = c.execute("SELECT * FROM symbols WHERE key BETWEEN ? AND ?", (startWith, firstExcl))
-    for row in res:
-        yield row
-
-def IndexDbDelete(conn, key):
-    c = conn.cursor()
-    c.execute("DELETE FROM symbols WHERE key = ?", (key,))
-    conn.commit()
-
-def IndexDbPut(conn, key, value):
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO symbols VALUES (?, ?)", (key, value))
-    conn.commit()
-
-def IndexDbGet(conn, key, default=None):
-    c = conn.cursor()
-    c.execute("SELECT * FROM symbols WHERE key = ?", (key,))
-    ret = c.fetchone() 
-    if ret is None: ret = default
-    else: ret = ret[1]
-    return ret
-"""
-
 # abstract all the communication to the database so that replacing the underlying DB is easier
 dbLock = threading.Lock()
 dbInstance = None
@@ -249,7 +174,6 @@ def ExtractSymbols(indexDb, fileName, node):
 
     symbol = node.get_usr()
     if symbol and node.spelling:
-        parsingState = "Parsing %s : %s" % (fileName, node.spelling)
         IndexDbPut(indexDb, "spelling%%%" + symbol, node.spelling)
         IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
         IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
@@ -307,6 +231,8 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
         ExtractSymbols(indexDb, fileName, tu.cursor)
 
         IndexDbPut(indexDb, 'f%%%' + fileName, str(lastModified))
+
+        parsingState = "Looking for files to parse"
 
 def UpdateCppIndex(clangLibraryPath, indexDbPath, compilationDbPath):
     global parsingState
