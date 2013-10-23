@@ -1,8 +1,9 @@
 import leveldb
 import json
 import os.path
+#import vim
 
-from clang.cindex import Index, Config, TranslationUnitLoadError
+from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind
 
 # TODO: handle files that are deleted. today we only add and reparse files
 
@@ -33,6 +34,7 @@ from clang.cindex import Index, Config, TranslationUnitLoadError
 #      be used to parse the header file
 #
 # <symbol> is what get_usr for a cursor returns
+# <use_type> is a CursorKind.value. If the entry is also a definition, <use_type> is negative of that number
 #
 
 def ResetIndex(indexDbPath):
@@ -62,26 +64,35 @@ def IterateOverFiles(compDb, indexDb):
         if 'command' in entry and 'file' in entry:
             command = entry['command'].split()
             if '++' in command[0]:
-                fileName = entry['file']
+                fileName = os.path.normpath(entry['file'])
+
+                # it should be startswith in the general case, but for MemSQL we can have /usr/include in the middle of the string
+                if "/usr/include" in fileName:
+                    continue
                 flags = command[1:]
 
                 lastModified = int(os.path.getmtime(fileName))
-                print fileName
                 yield (fileName, command, lastModified)
 
-def ExtractSymbols(indexDb, fileName, node):
-    if node.location.file != None and node.location.file.name != fileName:
+def GetNodeUseType(node):
+    ret = node.kind.value
+    if node.is_definition():
+        ret = -ret
+    return ret
+
+def ExtractSymbols(batch, fileName, node):
+    if node.location.file != None and os.path.normpath(node.location.file.name) != os.path.normpath(fileName):
         return
 
     symbol = node.get_usr()
     if symbol:
 #        print node.get_usr(), '=>', node.spelling, ' (', node.location.line, 'x', node.location.column, ')'
-        indexDb.Put("spelling%%%" + symbol, node.spelling)
-        indexDb.Put("c%%%" + fileName + "%%%" + symbol, '1')
-        indexDb.Put("s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(node.kind))
-        indexDb.Put("n%%%" + node.spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(node.kind))
+        batch.Put("spelling%%%" + symbol, node.spelling)
+        batch.Put("c%%%" + fileName + "%%%" + symbol, '1')
+        batch.Put("s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
+        batch.Put("n%%%" + node.spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
     for c in node.get_children():
-        ExtractSymbols(indexDb, fileName, c)
+        ExtractSymbols(batch, fileName, c)
 
 def GetSymbolSpelling(indexDb, symbol):
     try:
@@ -104,6 +115,7 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
         lastKnown = 0
 
     if lastKnown < lastModified:
+        print fileName
         indexDb.Put('F%%%' + os.path.basename(fileName) + "%%%" + fileName, '1')
         try:
             tu = index.parse(None, command + ["-I%s" % x for x in additionalInclude])
@@ -124,14 +136,17 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
         includes = set()
         for incl in tu.get_includes():
             if incl.include:
-                includes.add(incl.include)
+                includes.add(os.path.normpath(incl.include.name))
 
         for incl in includes:
-            indexDb.Put("h%%%" + fileName + "%%%" + incl.name, ' '.join(command))
+            indexDb.Put("h%%%" + fileName + "%%%" + incl, ' '.join(command))
 
         # parse symbols
         DeleteFromIndex(indexDb, "c%%%" + fileName + "%%%", RemoveSymbol)
-        ExtractSymbols(indexDb, fileName, tu.cursor)
+
+        batch = leveldb.WriteBatch()
+        ExtractSymbols(batch, fileName, tu.cursor)
+        indexDb.Write(batch)
 
         indexDb.Put('f%%%' + fileName, str(lastModified))
 
@@ -155,6 +170,113 @@ def UpdateCppIndex(indexDbPath, compilationDbPath, additionalInclude):
         for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
             ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
 
-Config.set_library_path("/home/alex/llvm/lib")
-ResetIndex('./db')
-UpdateCppIndex('./db', '/home/alex/mysql/compile_commands.json', ["/home/alex/llvm/lib/clang/3.2/include/"])
+lastLocations = []
+lastRet = []
+
+def JumpTo(filename, line, column):
+  if filename != vim.current.buffer.name:
+    try:
+      vim.command("edit %s" % filename)
+    except:
+      # For some unknown reason, whenever an exception occurs in
+      # vim.command, vim goes crazy and output tons of useless python
+      # errors, catch those.
+      return
+  else:
+    vim.command("normal m'")
+  vim.current.window.cursor = (line, column - 1)
+
+def NavigateToEntry(entry):
+    global lastLocations
+    if '[' in entry:
+        id = int(entry[entry.find('[') + 1:entry.find(']')])
+        loc = lastLocations[id]
+        JumpTo(loc[0], int(loc[1]), int(loc[2]))
+
+def GetItemsMatchingPattern(prefix, limit):
+    global lastLocations
+    global lastRet
+
+    ret = []
+    locations = []
+    print prefix
+
+    ordinal = 0
+    try:
+        indexDb = leveldb.LevelDB("/home/alex/CtrlK/db")
+
+        for key in indexDb.RangeIter('n%%%'+prefix, 'n%%%' + prefix + '~~~~~~~~~~~~~~~', True):
+            if limit > 0:
+                ret.append(ExtractPart(key[0], 1) + " - " + GetReferenceKind(int(key[1])) + " from " + (ExtractPart(key[0], 2)) + " [" + str(ordinal) + "]")
+                locations.append([ExtractPart(key[0], 2), int(ExtractPart(key[0], 3)), int(ExtractPart(key[0], 4))])
+                ordinal += 1
+                limit -= 1
+        for key in indexDb.RangeIter('F%%%'+prefix, 'F%%%' + prefix + '~~~~~~~~~~~~~~~'):
+            if limit > 0:
+                ret.append(ExtractPart(key[0], 1) + " [" + str(ordinal) + "]")
+                locations.append([ExtractPart(key[0], 2), 1, 1])
+                ordinal += 1
+                limit -= 1
+        lastRet = ret
+        lastLocations = locations
+
+        return ret
+    except leveldb.LevelDBError as e:
+        return lastRet
+
+if __name__ == "__main__":
+#    Config.set_library_path("/home/alex/llvm/lib")
+#    ResetIndex('./db')
+#    UpdateCppIndex('./db', '/home/alex/mysql/compile_commands.json', ["/home/alex/llvm/lib/clang/3.2/include/"])
+
+    pass
+
+def GetReferenceKind(val):
+    isDef = False
+    if val < 0:
+        val = -val
+        isDef = True
+    if val in referenceKinds:
+        ret = referenceKinds[val]
+        if isDef:
+            ret = ret.replace("declaration", "DEFINITION")
+        return ret
+    return "other"
+
+referenceKinds = dict({
+ 1 : 'type declaration',
+ 2 : 'type declaration',
+ 3 : 'type declaration',
+ 4 : 'type declaration',
+ 5 : 'type declaration',
+ 6 : 'member declaration',
+ 7 : 'enum declaration',
+ 8 : 'function declaration',
+ 9 : 'variable declaration',
+10 : 'argument declaration',
+20 : 'typedef declaration',
+21 : 'method declaration',
+22 : 'namespace declaration',
+24 : 'constructor declaration',
+25 : 'destructor declaration',
+26 : 'conversion function declaration',
+27 : 'template type parameter',
+28 : 'non-type template parameter',
+29 : 'template template parameter',
+30 : 'function template declaration',
+31 : 'class template declaration',
+32 : 'class template partial specialization',
+33 : 'namespace alias',
+43 : 'type reference',
+44 : 'base specifier',
+45 : 'template reference',
+46 : 'namespace reference',
+47 : 'member reference',
+48 : 'label reference',
+49 : 'overloaded declaration reference',
+100 : 'expression',
+101 : 'reference',
+102 : 'member reference',
+103 : 'function call'
+})
+
