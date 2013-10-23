@@ -1,4 +1,4 @@
-" This file is fuf/callbackitem (FuzzyFinder) with chacnes necessary for CtrlK
+" This file is fuf/callbackitem (FuzzyFinder) with changes necessary for CtrlK
 "
 "=============================================================================
 " Copyright for the original fuf/callbackitem.vim (c) 2007-2010 Takeshi NISHIDA
@@ -10,8 +10,8 @@ if !l9#guardScriptLoading(expand('<sfile>:p'), 0, 0, [])
   finish
 endif
 
-let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
-exe 'pyfile ' . fnameescape(s:plugin_path) . '/../ctrlk.py'
+"let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
+"exe 'pyfile ' . fnameescape(s:plugin_path) . '/../ctrlk.py'
 
 let s:mode_added = 0
 
