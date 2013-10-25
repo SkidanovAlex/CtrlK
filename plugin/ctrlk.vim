@@ -2,6 +2,8 @@ if !l9#guardScriptLoading(expand('<sfile>:p'), 0, 0, [])
   finish
 endif
 
+au FileType c,cpp,objc,objcpp call <SID>CtrlKInitBuffer()
+
 call l9#defineVariableDefault('g:ctrlk_clang_library_path'        , '')
 
 let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
@@ -11,7 +13,7 @@ function! CtrlKNavigate(entry, mode)
     python NavigateToEntry(vim.eval('a:entry'))
 endfunction
 
-function! RunCtrlK()
+function! CtrlKNavigateSymbols()
     python vim.command('let s:my_items = ' + str(GetItemsMatchingPattern('', int(vim.eval('g:fuf_enumeratingLimit')) + 1)))
     call fuf#fufctrlk#launch('', 1, 'navigate C++>', {'onComplete': function('CtrlKNavigate')}, s:my_items, 0)
 endfunction
@@ -20,9 +22,47 @@ function! GetCtrlKState()
     python GetCtrlKState()
 endfunction
 
-augroup CtrlK
-    autocmd VimLeave * python LeaveCtrlK()
-augroup END
+function! ResetCtrlK()
+    python ResetIndex()
+endfunction
+
+function! CtrlKGetCurrentScope()
+    if !exists('b:current_scope')
+        return ''
+    endif
+    return b:current_scope
+endfunction
+
+function! CtrlKGoToDefinition()
+    python GoToDefinition()
+endfunction
+
+function! CtrlKGetReferences()
+    python vim.command('let l:list = ' + str(FindReferences()))
+    if !empty(l:list)
+        copen
+        call setqflist(l:list)
+    else
+        cclose
+    endif
+endfunction
+
+function! s:ReadyToParse()
+    python RequestParse()
+endfunction
+
+function! s:UpdateCurrentScope()
+    python vim.command('let b:current_scope = "' + GetCurrentScopeStr() + '"')
+endfunction
+
+function! s:CtrlKInitBuffer()
+    augroup CtrlK
+        autocmd!
+        autocmd VimLeave * python LeaveCtrlK()
+        au CursorHold,CursorHoldI,InsertLeave,BufEnter,BufRead,FileType <buffer> call <SID>ReadyToParse()
+"        au CursorMoved,CursorMovedI <buffer> call <SID>UpdateCurrentScope()
+    augroup END
+endfunction
 
 python InitCtrlK(vim.eval('g:ctrlk_clang_library_path'))
 

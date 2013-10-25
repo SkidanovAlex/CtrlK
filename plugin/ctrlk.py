@@ -6,7 +6,7 @@ import threading
 import signal
 import time
 
-from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind
+from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor
 
 # TODO: handle files that are deleted. today we only add and reparse files
 
@@ -24,7 +24,7 @@ from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind
 #   s%%%<symbol>%%%<file_name>%%%<line>%%%<col> => <use_type>
 #      actual symbols database for 'goto definition' and 'goto declaration'
 #
-#   n%%%<spelling>%%%<file_name>%%%<line>%%%<col> => <use_type>
+#   n%%%<spelling>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
 #      actual symbols database for Ctrl+K
 #
 #   F%%%<file_name_without_path>%%%<full_file_path> => 1
@@ -47,6 +47,7 @@ compilationDbPath = None
 updateProcess = None
 
 parsingState = ""
+parsingCurrentState = ""
 
 # the following two functions are taken from clang_complete plugin
 def canFindBuiltinHeaders(index, args = []):
@@ -133,7 +134,7 @@ def IndexDbGet(conn, key, default=None):
 def ResetIndex():
     global indexDbPath
     if indexDbPath == None: return
-    indexDb = OpenIndexDb(indexDbPath, readOnly = False)
+    indexDb = IndexDbOpen(indexDbPath, readOnly = False)
     for key, value in IndexDbRangeIter(indexDb):
         IndexDbDelete(indexDb, key)
 
@@ -144,6 +145,8 @@ def DeleteFromIndex(indexDb, pattern, callback = None):
         if callback != None:
             callback(indexDb, key)
 
+# ==== Maintaining the index
+
 def ExtractPart(line, ordinal):
     return line.split('%%%')[ordinal]
 
@@ -151,13 +154,12 @@ def IterateOverFiles(compDb, indexDb):
     for entry in compDb:
         if 'command' in entry and 'file' in entry:
             command = entry['command'].split()
-            if '++' in command[0]:
+            if '++' in command[0] or "gcc" in command[0] or "clang" in command[0]:
                 fileName = os.path.normpath(entry['file'])
 
                 # it could be startswith in the general case, but for my specific purposes I needed to check the middle of the string too -- AS
                 if "/usr/include" in fileName:
                     continue
-                flags = command[1:]
 
                 lastModified = int(os.path.getmtime(fileName))
                 yield (fileName, command, lastModified)
@@ -168,18 +170,28 @@ def GetNodeUseType(node):
         ret = -ret
     return ret
 
-def ExtractSymbols(indexDb, fileName, node):
+def ExtractSymbols(indexDb, fileName, node, parentSpelling):
     if node.location.file != None and os.path.normpath(node.location.file.name) != os.path.normpath(fileName):
         return
 
     symbol = node.get_usr()
-    if symbol and node.spelling:
-        IndexDbPut(indexDb, "spelling%%%" + symbol, node.spelling)
+    spelling = node.spelling
+    addToN = True
+    if node.referenced:
+        if not symbol: 
+            symbol = node.referenced.get_usr()
+            addToN = False
+        if not spelling: spelling = node.referenced.spelling
+    if symbol and spelling:
+        if parentSpelling != "": parentSpelling += "::"
+        parentSpelling += spelling
+        IndexDbPut(indexDb, "spelling%%%" + symbol, spelling)
         IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
         IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
-        IndexDbPut(indexDb, "n%%%" + node.spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
+        if addToN:
+            IndexDbPut(indexDb, "n%%%" + spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
     for c in node.get_children():
-        ExtractSymbols(indexDb, fileName, c)
+        ExtractSymbols(indexDb, fileName, c, parentSpelling)
 
 def GetSymbolSpelling(indexDb, symbol):
     return IndexDbGet(indexDb, "spelling%%%" + symbol, default = "(not found)")
@@ -202,7 +214,7 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
 
         IndexDbPut(indexDb, 'F%%%' + os.path.basename(fileName) + "%%%" + fileName, '1')
         try:
-            tu = index.parse(None, command + ["-I%s" % x for x in additionalInclude])
+            tu = index.parse(None, command + ["-I%s" % additionalInclude])
         except TranslationUnitLoadError as e:
             # TODO: handle failure
             return
@@ -228,53 +240,58 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
         # parse symbols
         DeleteFromIndex(indexDb, "c%%%" + fileName + "%%%", RemoveSymbol)
 
-        ExtractSymbols(indexDb, fileName, tu.cursor)
+        ExtractSymbols(indexDb, fileName, tu.cursor, "")
 
         IndexDbPut(indexDb, 'f%%%' + fileName, str(lastModified))
 
         parsingState = "Looking for files to parse"
 
-def UpdateCppIndex(clangLibraryPath, indexDbPath, compilationDbPath):
+def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
     global parsingState
 
-    Config.set_library_path(clangLibraryPath)
-    Config.set_compatibility_check(False)
+    try:
+        Config.set_library_path(clangLibraryPath)
+        Config.set_compatibility_check(False)
 
-    if indexDbPath == None:
-        parsingState = "indexDbPath is not set"
-        return
-    if compilationDbPath == None:
-        parsingState = "compilationDbPath is not set"
-        return
+        if indexDbPath == None:
+            parsingState = "indexDbPath is not set"
+            return
+        if compilationDbPath == None:
+            parsingState = "compilationDbPath is not set"
+            return
 
-    indexDb = IndexDbOpen(indexDbPath, readOnly = False, create = True)
+        indexDb = IndexDbOpen(indexDbPath, readOnly = False, create = True)
 
-    additionalInclude = getBuiltinHeaderPath(clangLibraryPath)
+        additionalInclude = getBuiltinHeaderPath(clangLibraryPath)
 
-    if additionalInclude == None:
-        parsingState = "Cannot find clang includes"
-        return
+        if additionalInclude == None:
+            parsingState = "Cannot find clang includes"
+            return
 
-    while True:
-        with file(compilationDbPath) as f:
-            compDb = json.loads(f.read())
+        while True:
+            with file(compilationDbPath) as f:
+                compDb = json.loads(f.read())
 
-            index = Index.create()
+                index = Index.create()
 
-            # on the first scan we parse both headers and symbols
-            for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
+                # on the first scan we parse both headers and symbols
+                for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
+                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
 
-            # add all the header files to the compilation database we use
-            for key, value in IndexDbRangeIter(indexDb, "h%%%"):
-                compDb.append({'command': value, 'file': ExtractPart(key, 2)})
+                # add all the header files to the compilation database we use
+                for key, value in IndexDbRangeIter(indexDb, "h%%%"):
+                    compDb.append({'command': value, 'file': ExtractPart(key, 2)})
 
-            # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
-            for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
+                # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
+                for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
+                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
 
-        parsingState = "Sleeping"
-        time.sleep(10)
+            parsingState = "Sleeping"
+            time.sleep(10)
+    except Exception as e:
+        parsingState = "Failed with %s" % (str(e))
+
+# === Symbol lookup
 
 lastLocations = []
 lastRet = []
@@ -317,7 +334,7 @@ def GetItemsMatchingPattern(prefix, limit):
 
         for key, value in IndexDbRangeIter(indexDb, 'n%%%' + prefix):
             if limit > 0:
-                ret.append(ExtractPart(key, 1) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 2)) + " [" + str(ordinal) + "]")
+                ret.append(ExtractPart(key, 5) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 2)) + " [" + str(ordinal) + "]")
                 locations.append([ExtractPart(key, 2), int(ExtractPart(key, 3)), int(ExtractPart(key, 4))])
                 ordinal += 1
                 limit -= 1
@@ -335,11 +352,169 @@ def GetItemsMatchingPattern(prefix, limit):
         raise
         return lastRet
 
+# === Goto defintion / declaration
+
+parseLock = threading.Lock()
+parseFile = ""
+parseContent = ""
+parseNeeded = False
+parseLastFile = ""
+parseTu = None
+
+def ParseCurrentFileThread(clangLibraryPath, indexDbPath):
+    global parsingCurrentState
+
+    try:
+        additionalInclude = getBuiltinHeaderPath(clangLibraryPath)
+        if additionalInclude == None:
+            parsingCurrentState = "Cannot find clang includes"
+            return
+
+        if indexDbPath == None:
+            parsingCurrentState = "indexDbPath is not set"
+            return
+
+        indexDb = IndexDbOpen(indexDbPath, readOnly = True, create = True)
+
+        while True:
+            time.sleep(0.1)
+            ParseCurrentFile(indexDb, additionalInclude)
+    except Exception as e:
+        parsingCurrentState = "Failed with %s" % (str(e))
+
+def ParseCurrentFile(indexDb, additionalInclude):
+    global parseLock
+    global parseFile
+    global parseContent
+    global parseNeeded
+    global parseLastFile
+    global parseTu
+    global parsingCurrentState
+
+    with parseLock:
+        if not parseNeeded:
+            return
+        fileToParse = parseFile
+        contentToParse = parseContent
+        parseNeeded = False
+        parsingCurrentState = "Parsing %s" % fileToParse
+
+    command = None
+    # HACK! FIXME! DON'T LEAVE ME LIKE THIS
+    # Hope this file has at least one header file, that header file will conviniently have command line args for this file
+    for k, v in IndexDbRangeIter(indexDb, "h%%%" + fileToParse):
+        command = v
+        break
+
+    if command == None:
+        parsingCurrentState = "Can't find command line arguments"
+        return
+
+    index = Index.create()
+    tu = index.parse(None, command.split() + ["-I%s" % additionalInclude], unsaved_files=[(fileToParse, contentToParse)])
+
+    with parseLock:
+        parseTu = tu
+        parseLastFile = fileToParse
+        parsingCurrentState = "Parsed %s" % fileToParse
+
+def RequestParse():
+    global parseLock
+    global parseFile
+    global parseContent
+    global parseNeeded
+    with parseLock:
+        parseFile = vim.current.buffer.name
+        if parseFile != None:
+            parseContent = "\n".join(vim.current.buffer[:] + ["\n"])
+            parseNeeded = True
+
+def GetCurrentTranslationUnit():
+    global parseLock
+    global parseLastFile
+    global parseTu
+    with parseLock:
+        curName = vim.current.buffer.name
+        if curName is not None and curName == parseLastFile:
+            return parseTu
+        return None
+
+def GetCurrentUsr(tu):
+    line, col = vim.current.window.cursor
+    col = col + 1
+    f = File.from_name(tu, vim.current.buffer.name)
+    loc = SourceLocation.from_position(tu, f, line, col)
+    cursor = Cursor.from_location(tu, loc)
+
+    while cursor is not None and (not cursor.referenced or not cursor.referenced.get_usr()):
+        nextCursor = cursor.lexical_parent
+        if nextCursor is not None and nextCursor == cursor:
+            return None
+        cursor = nextCursor
+    if cursor is None:
+        return None
+    return cursor.referenced.get_usr()
+
+def GoToDefinition():
+    global indexDbPath
+    if indexDbPath == None: return
+    indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+
+    tu = GetCurrentTranslationUnit()
+    if tu is not None:
+        usr = GetCurrentUsr(tu)
+        if usr != None:
+            for k, v in IndexDbRangeIter(indexDb, "s%%%" + usr + "%%%"):
+                if int(v) < 0:
+                    JumpTo(ExtractPart(k, 2), int(ExtractPart(k, 3)), int(ExtractPart(k, 4)))
+
+def FindReferences():
+    global indexDbPath
+    if indexDbPath == None: return
+    indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+
+    ret = []
+    tu = GetCurrentTranslationUnit()
+    if tu is not None:
+        usr = GetCurrentUsr(tu)
+        if usr != None:
+            for k, v in IndexDbRangeIter(indexDb, "s%%%" + usr + "%%%"):
+                fileName = ExtractPart(k, 2)
+                line = int(ExtractPart(k, 3))
+                col = int(ExtractPart(k, 4))
+                ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': GetReferenceKind(int(v)), 'kind': abs(int(v))})
+
+    return ret
+
+def GetCurrentScopeStrInternal(cursor, pos):
+    for ch in cursor.get_children():
+        if ch.extent.start.line <= pos and ch.extent.end.line >= pos and str(ch.extent.end.file) == str(cursor.extent.end.file):
+            ret = ''
+            if ch.spelling is not None:
+              ret = ch.spelling
+            other = GetCurrentScopeStrInternal(ch, pos)
+            if '' != other:
+              if ret != '': ret += '::'
+              ret += other
+            if '' != ret:
+              return ret
+    return ''
+
+def GetCurrentScopeStr():
+    line, col = vim.current.window.cursor
+
+    tu = GetCurrentTranslationUnit()
+    if tu is None:
+        return ""
+  
+    return GetCurrentScopeStrInternal(tu.cursor, line)
+
 def InitCtrlK(libraryPath):
     global compilationDbPath
     global indexDbPath
     global clangLibraryPath
     global parsingState
+    global parsingCurrentState
     global updateProcess
 
     clangLibraryPath = libraryPath
@@ -355,27 +530,28 @@ def InitCtrlK(libraryPath):
             break
 
     parsingState = "Ready to parse"
+    parsingCurrentState = "Ready to parse"
 
     if compilationDbPath == None:
         parsingState = "Cannot find compilation database"
     elif updateProcess == None:
-        updateProcess = threading.Thread(target=UpdateCppIndex, args=(clangLibraryPath, indexDbPath, compilationDbPath))
+        updateProcess = threading.Thread(target=UpdateCppIndexThread, args=(clangLibraryPath, indexDbPath, compilationDbPath))
         updateProcess.daemon = True
         updateProcess.start()
 
+        updateFileProcess = threading.Thread(target=ParseCurrentFileThread, args=(clangLibraryPath, indexDbPath))
+        updateFileProcess.daemon = True
+        updateFileProcess.start()
+
 def LeaveCtrlK():
-    """ for multiprocessing
-    global updateProcess
-    if updateProcess != None:
-        os.kill(updateProcess.pid, signal.SIGKILL)
-        """
     for thread in threading.enumerate():
-        if thread.isAlive():
+        if thread.isAlive() and thread != threading.currentThread():
             thread._Thread__stop()
 
 def GetCtrlKState():
     global parsingState
-    print parsingState
+    global parsingCurrentState
+    print "Index: %s / Current: %s" % (parsingState, parsingCurrentState)
 
 def GetReferenceKind(val):
     isDef = False

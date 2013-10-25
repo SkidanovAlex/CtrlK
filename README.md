@@ -5,9 +5,15 @@ CtrlK is a plugin to navigate C++ symbols. It is based on Clang library, and use
 
 It uses compilation databases to get the project files, and LevelDB to store the internal index.
 
-The goal is to implement symbol lookups, GoTo definition and GoTo declaration, as well as some other smaller features.
+Supported features are:
 
-Currently only symbol lookup (similar to Ctrl+K in QtCreator / Ctrl+Comma in Visual Studio) is implmeneted.
+1. Symbol navigation similar to Ctrl+K in QtCreator / Ctrl+Comma in Visual Studio
+
+2. GoTo Definition 
+
+3. Find References
+
+Current limitations: only one instance of vim per project works properly.
 
 Installation
 ------------
@@ -27,15 +33,23 @@ You might also need to install leveldb module for python:
 
 Configuration
 -------------
-Here's a sample `.vimrc` file:
+Here's a sample `.vimrc` file, that mimics QtCreator key bindings:
 
   ```vim
-  let g:ctrlk_clang_library_path="/home/alex/llvm/lib"
-  nmap e :call RunCtrlK()<CR>
-  nmap E :call GetCtrlKState()<CR>
+  let g:ctrlk_clang_library_path="/home/user/llvm/lib"
+  nmap <C-F2> :call GetCtrlKState()<CR>
+  nmap <C-k> :call CtrlKNavigateSymbols()<CR>
+  nmap <F2> :call CtrlKGoToDefinition()<CR>
+  nmap <F12> :call CtrlKGetReferences()<CR>
   ```
 
-Set `g:ctrlk_clang_library_path` to your llvm lib folder, then map the key you would like to use to navigate the symbols to call `RunCtrlK`. In this example I use letter `e`, which default behavior I personally find to be useless in the normal mode. You can also bind some other key to run `GetCtrlKState`, which will print the current state of the parser.
+Set `g:ctrlk_clang_library_path` to your llvm lib folder.
+This maps Ctrl+k to open symbol navigation window, F2 to go to the current symbol's definition and F12 to show all the references to symbol under cursor.
+Ctrl+F2 is showing the current state of the indexer and background parsing thread in the form
+
+  ```Index: <status of the indexer> / Current: <status of the parsing thread>```
+
+Note that CtrlK's indexer is rather slow. Indexing your project first time can take a considerable amount of time. Pressing Ctrl+F2 will tell you which file is being parsed right now. When all the files are parsed, Ctrl+F2 will print "Sleeping" as the indexer status.
 
 Compilation database
 --------------------
