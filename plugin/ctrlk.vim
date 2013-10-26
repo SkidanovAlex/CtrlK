@@ -14,7 +14,7 @@ function! CtrlKNavigate(entry, mode)
 endfunction
 
 function! CtrlKNavigateSymbols()
-    python vim.command('let s:my_items = ' + str(GetItemsMatchingPattern('', int(vim.eval('g:fuf_enumeratingLimit')) + 1)))
+    let s:my_items = []
     call fuf#fufctrlk#launch('', 1, 'navigate C++>', {'onComplete': function('CtrlKNavigate')}, s:my_items, 0)
 endfunction
 

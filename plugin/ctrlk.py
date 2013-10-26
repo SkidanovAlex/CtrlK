@@ -190,7 +190,9 @@ def ExtractSymbols(indexDb, fileName, node, parentSpelling):
             IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
             IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
             if addToN:
-                IndexDbPut(indexDb, "n%%%" + spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+                for i in range(len(spelling)):
+                    suffix = spelling[i:].lower()
+                    IndexDbPut(indexDb, "n%%%" + suffix + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
     except ValueError:
         pass
     for c in node.get_children():
@@ -215,7 +217,7 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
     if lastKnown < lastModified:
         parsingState = "Parsing %s" % fileName
 
-        IndexDbPut(indexDb, 'F%%%' + os.path.basename(fileName) + "%%%" + fileName, '1')
+        IndexDbPut(indexDb, 'F%%%' + os.path.basename(fileName).lower() + "%%%" + fileName, '1')
         try:
             tu = index.parse(None, command + ["-I%s" % additionalInclude])
         except TranslationUnitLoadError as e:
@@ -325,6 +327,9 @@ def GetItemsMatchingPattern(prefix, limit):
     if indexDbPath == None:
         return []
 
+    if prefix == "":
+        return ["Search for a function, class, variable, or file name."]
+
     global lastLocations
     global lastRet
 
@@ -335,15 +340,16 @@ def GetItemsMatchingPattern(prefix, limit):
     try:
         indexDb = IndexDbOpen(indexDbPath, readOnly = True)
 
-        for key, value in IndexDbRangeIter(indexDb, 'n%%%' + prefix):
+        for key, value in IndexDbRangeIter(indexDb, 'n%%%' + prefix.lower()):
             if limit > 0:
                 ret.append(ExtractPart(key, 5) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 2)) + " [" + str(ordinal) + "]")
                 locations.append([ExtractPart(key, 2), int(ExtractPart(key, 3)), int(ExtractPart(key, 4))])
                 ordinal += 1
                 limit -= 1
-        for key, value in IndexDbRangeIter(indexDb, 'F%%%' + prefix):
+        for key, value in IndexDbRangeIter(indexDb, 'F%%%' + prefix.lower()):
             if limit > 0:
-                ret.append(ExtractPart(key, 1) + " [" + str(ordinal) + "]")
+                full_path = ExtractPart(key, 2)
+                ret.append(os.path.basename(full_path) + " (" + full_path + ") [" + str(ordinal) + "]")
                 locations.append([ExtractPart(key, 2), 1, 1])
                 ordinal += 1
                 limit -= 1
