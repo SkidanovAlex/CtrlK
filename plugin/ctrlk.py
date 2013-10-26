@@ -5,6 +5,7 @@ import vim
 import threading
 import time
 import traceback
+import Queue
 
 from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor
 
@@ -48,6 +49,8 @@ updateProcess = None
 
 parsingState = ""
 parsingCurrentState = ""
+
+parseQueue = Queue.Queue()
 
 # the following two functions are taken from clang_complete plugin
 def canFindBuiltinHeaders(index, args = []):
@@ -207,20 +210,18 @@ def RemoveSymbol(indexDb, key):
 
     DeleteFromIndex(indexDb, "s%%%" + symbol + "%%%" + fname + "%%%")
     DeleteFromIndex(indexDb, "n%%%" + GetSymbolSpelling(indexDb, symbol) + "%%%" + fname + "%%%")
-    
 
-def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders):
-    global parsingState
+
+def ParseFile(index, command, indexDbPath, fileName, lastModified, additionalInclude, parseHeaders):
+    indexDb = IndexDbOpen(indexDbPath, readOnly=False, create=True)
 
     lastKnown = int(IndexDbGet(indexDb, 'f%%%' + fileName, default = 0))
 
     if lastKnown < lastModified:
-        parsingState = "Parsing %s" % fileName
-
         IndexDbPut(indexDb, 'F%%%' + os.path.basename(fileName).lower() + "%%%" + fileName, '1')
         try:
             tu = index.parse(None, command + ["-I%s" % additionalInclude])
-        except TranslationUnitLoadError as e:
+        except TranslationUnitLoadError:
             # TODO: handle failure
             return
 
@@ -249,7 +250,12 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
 
         IndexDbPut(indexDb, 'f%%%' + fileName, str(lastModified))
 
-        parsingState = "Looking for files to parse"
+def ParseFileWorker():
+    global parseQueue
+
+    while True:
+        task = parseQueue.get()
+        ParseFile(*task)
 
 def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
     global parsingState
@@ -281,7 +287,11 @@ def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
 
                 # on the first scan we parse both headers and symbols
                 for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
+                    parseQueue.put((index, command, indexDbPath, fileName, lastModified, additionalInclude, True))
+
+                while not parseQueue.empty():
+                    parsingState = "Headers & Symbols Queue Size %d" % (parseQueue.qsize())
+                    time.sleep(0.5)
 
                 # add all the header files to the compilation database we use
                 for key, value in IndexDbRangeIter(indexDb, "h%%%"):
@@ -289,7 +299,11 @@ def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
 
                 # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
                 for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
+                    parseQueue.put((index, command, indexDbPath, fileName, lastModified, additionalInclude, False))
+
+                while not parseQueue.empty():
+                    parsingState = "Symbols Queue Size %d" % (parseQueue.qsize())
+                    time.sleep(0.5)
 
             parsingState = "Sleeping"
             time.sleep(10)
@@ -547,6 +561,11 @@ def InitCtrlK(libraryPath):
         updateProcess = threading.Thread(target=UpdateCppIndexThread, args=(clangLibraryPath, indexDbPath, compilationDbPath))
         updateProcess.daemon = True
         updateProcess.start()
+
+        for i in range(1):
+            t = threading.Thread(target=ParseFileWorker)
+            t.daemon = True
+            t.start()
 
         updateFileProcess = threading.Thread(target=ParseCurrentFileThread, args=(clangLibraryPath, indexDbPath))
         updateFileProcess.daemon = True
