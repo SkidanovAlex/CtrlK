@@ -104,7 +104,7 @@ def IndexDbOpen(path, readOnly, create = False):
             return dbInstance
         if create:
             if not os.path.exists(path):
-                os.makedirs(pat)
+                os.makedirs(path)
         dbInstance = leveldb.LevelDB(path)
         return dbInstance
 
@@ -154,7 +154,7 @@ def IterateOverFiles(compDb, indexDb):
     for entry in compDb:
         if 'command' in entry and 'file' in entry:
             command = entry['command'].split()
-            if '++' in command[0] or "gcc" in command[0] or "clang" in command[0]:
+            if '++' in command[0] or "cc" in command[0] or "clang" in command[0]:
                 fileName = os.path.normpath(entry['file'])
 
                 # it could be startswith in the general case, but for my specific purposes I needed to check the middle of the string too -- AS
@@ -174,22 +174,25 @@ def ExtractSymbols(indexDb, fileName, node, parentSpelling):
     if node.location.file != None and os.path.normpath(node.location.file.name) != os.path.normpath(fileName):
         return
 
-    symbol = node.get_usr()
-    spelling = node.spelling
-    addToN = True
-    if node.referenced:
-        if not symbol: 
-            symbol = node.referenced.get_usr()
-            addToN = False
-        if not spelling: spelling = node.referenced.spelling
-    if symbol and spelling:
-        if parentSpelling != "": parentSpelling += "::"
-        parentSpelling += spelling
-        IndexDbPut(indexDb, "spelling%%%" + symbol, spelling)
-        IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
-        IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
-        if addToN:
-            IndexDbPut(indexDb, "n%%%" + spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+    try:
+        symbol = node.get_usr()
+        spelling = node.spelling
+        addToN = True
+        if node.referenced:
+            if not symbol: 
+                symbol = node.referenced.get_usr()
+                addToN = False
+            if not spelling: spelling = node.referenced.spelling
+        if symbol and spelling:
+            if parentSpelling != "": parentSpelling += "::"
+            parentSpelling += spelling
+            IndexDbPut(indexDb, "spelling%%%" + symbol, spelling)
+            IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
+            IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
+            if addToN:
+                IndexDbPut(indexDb, "n%%%" + spelling + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+    except ValueError:
+        pass
     for c in node.get_children():
         ExtractSymbols(indexDb, fileName, c, parentSpelling)
 
