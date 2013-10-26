@@ -48,6 +48,10 @@ function! CtrlKGetReferences()
 endfunction
 
 function! s:ReadyToParse()
+    if b:changedtick == b:my_changedtick
+        return
+    endif
+    let b:my_changedtick = b:changedtick
     python RequestParse()
 endfunction
 
@@ -56,6 +60,8 @@ function! s:UpdateCurrentScope()
 endfunction
 
 function! s:CtrlKInitBuffer()
+    let b:my_changedtick = 0
+
     augroup CtrlK
         autocmd!
         autocmd VimLeave * python LeaveCtrlK()

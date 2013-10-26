@@ -3,8 +3,8 @@ import json
 import os.path
 import vim
 import threading
-import signal
 import time
+import traceback
 
 from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor
 
@@ -383,7 +383,7 @@ def ParseCurrentFileThread(clangLibraryPath, indexDbPath):
             time.sleep(0.1)
             ParseCurrentFile(indexDb, additionalInclude)
     except Exception as e:
-        parsingCurrentState = "Failed with %s" % (str(e))
+        parsingCurrentState = "Failed with %s" % (traceback.format_exc(e))
 
 def ParseCurrentFile(indexDb, additionalInclude):
     global parseLock
