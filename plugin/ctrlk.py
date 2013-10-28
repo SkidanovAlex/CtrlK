@@ -5,6 +5,7 @@ import vim
 import threading
 import time
 import traceback
+import ctypes
 
 from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor
 
@@ -24,8 +25,17 @@ from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, Fi
 #   s%%%<symbol>%%%<file_name>%%%<line>%%%<col> => <use_type>
 #      actual symbols database for 'goto definition' and 'goto declaration'
 #
-#   n%%%<spelling suffix>%%%<symbol>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
-#      actual symbols database for Ctrl+K
+#   ndef%%%<spelling>%%%<symbol>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
+#      Definitions for symbol navigation
+#
+#   ndecl%%%<spelling>%%%<symbol>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
+#      Declarations for symbol navigation
+#
+#   ndefsuf%%%<spelling suffix>%%%<symbol>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
+#      Suffixes of definitions for symbol navigation
+#
+#   ndeclsuf%%%<spelling suffix>%%%<symbol>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
+#      Suffixes of declarations for symbol navigation
 #
 #   F%%%<file_name_without_path>%%%<full_file_path> => 1
 #      so that we can show files in Ctrl_K
@@ -174,6 +184,19 @@ def GetNodeUseType(node):
         ret = -ret
     return ret
 
+# pos = 0 means it is not a suffix, it is full string
+def DbEntryPrefix(pos, node):
+    ret = 'n'
+
+    if node.is_definition():
+        ret += "def"
+    else:
+        ret += "decl"
+
+    if pos != 0:
+        ret += "suf"
+    return ret
+
 def ExtractSymbols(indexDb, fileName, node, parentSpelling):
     if node.location.file != None and os.path.normpath(node.location.file.name) != os.path.normpath(fileName):
         return
@@ -196,7 +219,7 @@ def ExtractSymbols(indexDb, fileName, node, parentSpelling):
             if addToN:
                 for i in range(len(spelling)):
                     suffix = spelling[i:].lower()
-                    IndexDbPut(indexDb, "n%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+                    IndexDbPut(indexDb, DbEntryPrefix(i, node) + "%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
     except ValueError:
         pass
     for c in node.get_children():
@@ -211,9 +234,12 @@ def RemoveSymbol(indexDb, key):
     spelling = GetSymbolSpelling(indexDb, symbol)
 
     DeleteFromIndex(indexDb, "s%%%" + symbol + "%%%" + fname + "%%%")
-    for i in range(len(spelling)):
+    DeleteFromIndex(indexDb, "ndef%%%" + spelling + "%%%" + symbol + "%%%" + fname + "%%%")
+    DeleteFromIndex(indexDb, "ndecl%%%" + spelling + "%%%" + symbol + "%%%" + fname + "%%%")
+    for i in range(1, len(spelling)):
         suffix = spelling[i:].lower()
-        DeleteFromIndex(indexDb, "n%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
+        DeleteFromIndex(indexDb, "ndefsuf%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
+        DeleteFromIndex(indexDb, "ndeclsuf%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
     
 
 def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders):
@@ -302,6 +328,8 @@ def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
             time.sleep(10)
     except Exception as e:
         parsingState = "Failed with %s" % (str(e))
+    except SystemExit as e:
+        pass
 
 # === Symbol lookup
 
@@ -323,6 +351,8 @@ def JumpTo(filename, line, column):
 
 def NavigateToEntry(entry):
     global lastLocations
+    if not lastLocations:
+        return
     if '[' in entry:
         id = int(entry[entry.find('[') + 1:entry.find(']')])
         loc = lastLocations[id]
@@ -347,12 +377,6 @@ def GetItemsMatchingPattern(prefix, limit):
     try:
         indexDb = IndexDbOpen(indexDbPath, readOnly = True)
 
-        for key, value in IndexDbRangeIter(indexDb, 'n%%%' + prefix.lower()):
-            if limit > 0:
-                ret.append(ExtractPart(key, 6) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 3)) + " [" + str(ordinal) + "]")
-                locations.append([ExtractPart(key, 3), int(ExtractPart(key, 4)), int(ExtractPart(key, 5))])
-                ordinal += 1
-                limit -= 1
         for key, value in IndexDbRangeIter(indexDb, 'F%%%' + prefix.lower()):
             if limit > 0:
                 full_path = ExtractPart(key, 2)
@@ -360,12 +384,22 @@ def GetItemsMatchingPattern(prefix, limit):
                 locations.append([ExtractPart(key, 2), 1, 1])
                 ordinal += 1
                 limit -= 1
+            else:
+                break
+        for dbPrefix in ["ndef", "ndefsuf", "ndecl", "ndeclsuf"]:
+            for key, value in IndexDbRangeIter(indexDb, dbPrefix + '%%%' + prefix.lower()):
+                if limit > 0:
+                    ret.append(ExtractPart(key, 6) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 3)) + " [" + str(ordinal) + "]")
+                    locations.append([ExtractPart(key, 3), int(ExtractPart(key, 4)), int(ExtractPart(key, 5))])
+                    ordinal += 1
+                    limit -= 1
+                else:
+                    break
         lastRet = ret
         lastLocations = locations
 
         return ret
     except Exception as e:
-        raise
         return lastRet
 
 # === Goto defintion / declaration
@@ -397,6 +431,8 @@ def ParseCurrentFileThread(clangLibraryPath, indexDbPath):
             ParseCurrentFile(indexDb, additionalInclude)
     except Exception as e:
         parsingCurrentState = "Failed with %s" % (traceback.format_exc(e))
+    except SystemExit as e:
+        pass
 
 def ParseCurrentFile(indexDb, additionalInclude):
     global parseLock
@@ -560,14 +596,29 @@ def InitCtrlK(libraryPath):
         updateFileProcess.daemon = True
         updateFileProcess.start()
 
+def terminate_thread(thread):
+    if not thread.isAlive():
+        return
+
+    exc = ctypes.py_object(SystemExit)
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_long(thread.ident), exc)
+    if res == 0:
+        raise ValueError("nonexistent thread id")
+    elif res > 1:
+        # """if it returns a number greater than one, you're in trouble,
+        # and you should call it again with exc=NULL to revert the effect"""
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(thread.ident, None)
+        raise SystemError("PyThreadState_SetAsyncExc failed")
+
 def LeaveCtrlK():
     global updateProcess
     global updateFileProcess
 
-    if updateProcess.isAlive():
-        updateProcess._Thread__stop()
-    if updateFileProcess.isAlive():
-        updateFileProcess._Thread__stop()
+    if updateProcess:
+        terminate_thread(updateProcess)
+    if updateFileProcess:
+        terminate_thread(updateFileProcess)
 
 def GetCtrlKState():
     global parsingState

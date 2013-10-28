@@ -128,19 +128,6 @@ function s:handler.getCompleteItems(patternPrimary)
 endfunction
 
 "
-function s:handler.getMatchingCompleteItems2(patternBase)
-  let patternSet = self.makePatternSet(a:patternBase)
-  let exprBoundary = s:makeFuzzyMatchingExpr('a:wordForBoundary', patternSet.primaryForRank)
-  let stats = filter(
-        \ copy(self.stats), 'v:val.pattern ==# patternSet.primaryForRank')
-  let items = self.getCompleteItems(patternSet.primary)
-  " NOTE: In order to know an excess, plus 1 to limit number
-  let items = l9#filterWithLimit(
-        \ items, patternSet.filteringExpr, g:fuf_enumeratingLimit + 1)
-  return map(items,
-        \ 's:setRanks(v:val, patternSet.primaryForRank, exprBoundary, stats)')
-endfunction
-
 function! s:handler.getMatchingCompleteItems(patternBase)
   let patternSet = self.makePatternSet(a:patternBase)
   let exprBoundary = s:makeFuzzyMatchingExpr('a:wordForBoundary', patternSet.primaryForRank)
@@ -154,8 +141,11 @@ function! s:handler.getMatchingCompleteItems(patternBase)
   call fuf#mapToSetSerialIndex(s:my_items, 1)
   call map(s:my_items, 'fuf#setAbbrWithFormattedWord(v:val, 1)')
 
-  return map(s:my_items,
-        \ 's:setRanks(v:val, patternSet.primaryForRank, exprBoundary, stats)')
+  for i in range(len(s:my_items))
+    let s:my_items[i].rank = [i]
+  endfor
+
+  return s:my_items
 endfunction
 
 "
