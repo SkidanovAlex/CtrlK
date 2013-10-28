@@ -1,6 +1,32 @@
-if !l9#guardScriptLoading(expand('<sfile>:p'), 0, 0, [])
+try
+  if !l9#guardScriptLoading(expand('<sfile>:p'), 0, 0, [])
+    finish
+  endif
+catch /E117/
+  echoerr '***** Please install L9 plugin *****'
   finish
-endif
+endtry
+
+try
+  call fuf#suffixNumber('')
+catch /E117/
+  echoerr '***** Please install FuzzyFinder plugin *****'
+  finish
+endtry
+
+try
+  python import clang
+catch
+  echoerr '***** Please install clang module for python *****'
+  finish
+endtry
+
+try
+  python import leveldb
+catch
+  echoerr '***** Please install leveldb module for python *****'
+  finish
+endtry
 
 au FileType c,cpp,objc,objcpp call <SID>CtrlKInitBuffer()
 

@@ -27,9 +27,10 @@ The easiest way to install CtrlK is to use Vundle.
 
 If you install it manually instead, make sure that l9 and FuzzyFinder are installed before installing CtrlK
 
-You might also need to install leveldb module for python:
+You might also need to install leveldb and clang modules for python:
 
-  ```sudo pip install leveldb```
+  ```sudo pip install leveldb
+  sudo pip install clang```
 
 Configuration
 -------------
@@ -37,15 +38,15 @@ Here's a sample `.vimrc` file, that mimics QtCreator key bindings:
 
   ```vim
   let g:ctrlk_clang_library_path="/home/user/llvm/lib"
-  nmap <C-F2> :call GetCtrlKState()<CR>
+  nmap <F3> :call GetCtrlKState()<CR>
   nmap <C-k> :call CtrlKNavigateSymbols()<CR>
   nmap <F2> :call CtrlKGoToDefinition()<CR>
   nmap <F12> :call CtrlKGetReferences()<CR>
   ```
 
-Set `g:ctrlk_clang_library_path` to your llvm lib folder.
+Set `g:ctrlk_clang_library_path` to your llvm lib folder (the folder that contains `libclang.so`).
 This maps Ctrl+k to open symbol navigation window, F2 to go to the current symbol's definition and F12 to show all the references to symbol under cursor.
-Ctrl+F2 is showing the current state of the indexer and background parsing thread in the form
+F3 is showing the current state of the indexer and background parsing thread in the form
 
   ```Index: <status of the indexer> / Current: <status of the parsing thread>```
 

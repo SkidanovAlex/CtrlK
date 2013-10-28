@@ -24,7 +24,7 @@ from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, Fi
 #   s%%%<symbol>%%%<file_name>%%%<line>%%%<col> => <use_type>
 #      actual symbols database for 'goto definition' and 'goto declaration'
 #
-#   n%%%<spelling>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
+#   n%%%<spelling suffix>%%%<symbol>%%%<file_name>%%%<line>%%%<col>%%%<spelling_with_class> => <use_type>
 #      actual symbols database for Ctrl+K
 #
 #   F%%%<file_name_without_path>%%%<full_file_path> => 1
@@ -45,6 +45,7 @@ clangLibraryPath = None
 indexDbPath = None
 compilationDbPath = None
 updateProcess = None
+updateFileProcess = None
 
 parsingState = ""
 parsingCurrentState = ""
@@ -155,10 +156,13 @@ def IterateOverFiles(compDb, indexDb):
         if 'command' in entry and 'file' in entry:
             command = entry['command'].split()
             if '++' in command[0] or "cc" in command[0] or "clang" in command[0]:
-                fileName = os.path.normpath(entry['file'])
+                fileName = os.path.abspath(entry['file'])
 
                 # it could be startswith in the general case, but for my specific purposes I needed to check the middle of the string too -- AS
                 if "/usr/include" in fileName:
+                    continue
+
+                if not os.path.exists(fileName):
                     continue
 
                 lastModified = int(os.path.getmtime(fileName))
@@ -192,7 +196,7 @@ def ExtractSymbols(indexDb, fileName, node, parentSpelling):
             if addToN:
                 for i in range(len(spelling)):
                     suffix = spelling[i:].lower()
-                    IndexDbPut(indexDb, "n%%%" + suffix + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+                    IndexDbPut(indexDb, "n%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
     except ValueError:
         pass
     for c in node.get_children():
@@ -204,9 +208,12 @@ def GetSymbolSpelling(indexDb, symbol):
 def RemoveSymbol(indexDb, key):
     symbol = ExtractPart(key, 2)
     fname = ExtractPart(key, 1)
+    spelling = GetSymbolSpelling(indexDb, symbol)
 
     DeleteFromIndex(indexDb, "s%%%" + symbol + "%%%" + fname + "%%%")
-    DeleteFromIndex(indexDb, "n%%%" + GetSymbolSpelling(indexDb, symbol) + "%%%" + fname + "%%%")
+    for i in range(len(spelling)):
+        suffix = spelling[i:].lower()
+        DeleteFromIndex(indexDb, "n%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
     
 
 def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders):
@@ -327,7 +334,7 @@ def GetItemsMatchingPattern(prefix, limit):
     if indexDbPath == None:
         return []
 
-    if prefix == "":
+    if prefix == "" or prefix == None:
         return ["Search for a function, class, variable, or file name."]
 
     global lastLocations
@@ -342,8 +349,8 @@ def GetItemsMatchingPattern(prefix, limit):
 
         for key, value in IndexDbRangeIter(indexDb, 'n%%%' + prefix.lower()):
             if limit > 0:
-                ret.append(ExtractPart(key, 5) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 2)) + " [" + str(ordinal) + "]")
-                locations.append([ExtractPart(key, 2), int(ExtractPart(key, 3)), int(ExtractPart(key, 4))])
+                ret.append(ExtractPart(key, 6) + " - " + GetReferenceKind(int(value)) + " from " + (ExtractPart(key, 3)) + " [" + str(ordinal) + "]")
+                locations.append([ExtractPart(key, 3), int(ExtractPart(key, 4)), int(ExtractPart(key, 5))])
                 ordinal += 1
                 limit -= 1
         for key, value in IndexDbRangeIter(indexDb, 'F%%%' + prefix.lower()):
@@ -525,6 +532,7 @@ def InitCtrlK(libraryPath):
     global parsingState
     global parsingCurrentState
     global updateProcess
+    global updateFileProcess
 
     clangLibraryPath = libraryPath
 
@@ -553,9 +561,13 @@ def InitCtrlK(libraryPath):
         updateFileProcess.start()
 
 def LeaveCtrlK():
-    for thread in threading.enumerate():
-        if thread.isAlive() and thread != threading.currentThread():
-            thread._Thread__stop()
+    global updateProcess
+    global updateFileProcess
+
+    if updateProcess.isAlive():
+        updateProcess._Thread__stop()
+    if updateFileProcess.isAlive():
+        updateFileProcess._Thread__stop()
 
 def GetCtrlKState():
     global parsingState
