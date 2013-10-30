@@ -7,7 +7,7 @@ import time
 import traceback
 import ctypes
 
-from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor
+from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor, TranslationUnit
 
 # TODO: handle files that are deleted. today we only add and reparse files
 
@@ -201,27 +201,32 @@ def ExtractSymbols(indexDb, fileName, node, parentSpelling):
     if node.location.file != None and os.path.normpath(node.location.file.name) != os.path.normpath(fileName):
         return
 
-    try:
-        symbol = node.get_usr()
-        spelling = node.spelling
-        addToN = True
-        if node.referenced:
-            if not symbol: 
-                symbol = node.referenced.get_usr()
-                addToN = False
-            if not spelling: spelling = node.referenced.spelling
-        if symbol and spelling:
-            if parentSpelling != "": parentSpelling += "::"
-            parentSpelling += spelling
-            IndexDbPut(indexDb, "spelling%%%" + symbol, spelling)
-            IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
-            IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
-            if addToN:
-                for i in range(len(spelling)):
-                    suffix = spelling[i:].lower()
-                    IndexDbPut(indexDb, DbEntryPrefix(i, node) + "%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
-    except ValueError:
-        pass
+    if node.location.file != None:
+        try:
+            symbol = node.get_usr()
+            spelling = node.spelling
+            if symbol and not spelling:
+                spelling = node.displayname
+            addToN = True
+            if node.referenced:
+                if not symbol: 
+                    symbol = node.referenced.get_usr()
+                    addToN = False
+                if not spelling: spelling = node.referenced.spelling
+                if symbol and not spelling:
+                    spelling = node.displayname
+            if symbol and spelling:
+                if parentSpelling != "": parentSpelling += "::"
+                parentSpelling += spelling
+                IndexDbPut(indexDb, "spelling%%%" + symbol, spelling)
+                IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
+                IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
+                if addToN:
+                    for i in range(len(spelling)):
+                        suffix = spelling[i:].lower()
+                        IndexDbPut(indexDb, DbEntryPrefix(i, node) + "%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+        except ValueError:
+            pass
     for c in node.get_children():
         ExtractSymbols(indexDb, fileName, c, parentSpelling)
 
@@ -252,7 +257,7 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
 
         IndexDbPut(indexDb, 'F%%%' + os.path.basename(fileName).lower() + "%%%" + fileName, '1')
         try:
-            tu = index.parse(None, command + ["-I%s" % additionalInclude])
+            tu = index.parse(None, command + ["-I%s" % additionalInclude], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
         except TranslationUnitLoadError as e:
             # TODO: handle failure
             return
@@ -467,7 +472,7 @@ def ParseCurrentFile(indexDb, additionalInclude):
         return
 
     index = Index.create()
-    tu = index.parse(None, command.split() + ["-I%s" % additionalInclude], unsaved_files=[(fileToParse, contentToParse)])
+    tu = index.parse(None, command.split() + ["-I%s" % additionalInclude], unsaved_files=[(fileToParse, contentToParse)], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
 
     with parseLock:
         parseTus[fileToParse] = tu
@@ -497,7 +502,7 @@ def GetCurrentTranslationUnit():
             return parseTus[curName]
         return None
 
-def GetCurrentUsr(tu):
+def GetCurrentUsrCursor(tu):
     line, col = vim.current.window.cursor
     col = col + 1
     f = File.from_name(tu, vim.current.buffer.name)
@@ -511,7 +516,7 @@ def GetCurrentUsr(tu):
         cursor = nextCursor
     if cursor is None:
         return None
-    return cursor.referenced.get_usr()
+    return cursor.referenced
 
 def GoToDefinition():
     global indexDbPath
@@ -520,11 +525,26 @@ def GoToDefinition():
 
     tu = GetCurrentTranslationUnit()
     if tu is not None:
-        usr = GetCurrentUsr(tu)
-        if usr != None:
+        cursor = GetCurrentUsrCursor(tu)
+        if cursor is not None:
+            usr = cursor.get_usr()
             for k, v in IndexDbRangeIter(indexDb, "s%%%" + usr + "%%%"):
                 if int(v) < 0:
                     JumpTo(ExtractPart(k, 2), int(ExtractPart(k, 3)), int(ExtractPart(k, 4)))
+                    return
+
+            # For macros is_definition is always false => we always store their type as a positive number =>
+            #    condition in the loop above is always false. It is actually a good thing, because in case
+            #    of macros if several header files in the project declare the same macro, it will have the
+            #    same USR in all of them. When we want to go to definition, we want to go to the one which
+            #    is visible from the current location, which is exactly what cursor.location points right now,
+            #    so just use it instead of the project database.
+            # It is also a good fall back for the case when we cannot find someting in the database (file is
+            #    not parsed yet, or failed to parse) -- we will jump to the visible declaration of the symbol
+            #
+            JumpTo(cursor.location.file, cursor.location.line, cursor.location.column)
+
+
 
 def FindReferences():
     global indexDbPath
@@ -534,8 +554,9 @@ def FindReferences():
     ret = []
     tu = GetCurrentTranslationUnit()
     if tu is not None:
-        usr = GetCurrentUsr(tu)
-        if usr != None:
+        cursor = GetCurrentUsrCursor(tu)
+        if cursor is not None:
+            usr = cursor.get_usr()
             for k, v in IndexDbRangeIter(indexDb, "s%%%" + usr + "%%%"):
                 fileName = ExtractPart(k, 2)
                 line = int(ExtractPart(k, 3))
@@ -677,6 +698,8 @@ referenceKinds = dict({
 100 : 'expression',
 101 : 'reference',
 102 : 'member reference',
-103 : 'function call'
+103 : 'function call',
+501 : 'macro declaraion',
+502 : 'macro instantiation'
 })
 
