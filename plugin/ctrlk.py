@@ -234,8 +234,8 @@ def RemoveSymbol(indexDb, key):
     spelling = GetSymbolSpelling(indexDb, symbol)
 
     DeleteFromIndex(indexDb, "s%%%" + symbol + "%%%" + fname + "%%%")
-    DeleteFromIndex(indexDb, "ndef%%%" + spelling + "%%%" + symbol + "%%%" + fname + "%%%")
-    DeleteFromIndex(indexDb, "ndecl%%%" + spelling + "%%%" + symbol + "%%%" + fname + "%%%")
+    DeleteFromIndex(indexDb, "ndef%%%" + spelling.lower() + "%%%" + symbol + "%%%" + fname + "%%%")
+    DeleteFromIndex(indexDb, "ndecl%%%" + spelling.lower() + "%%%" + symbol + "%%%" + fname + "%%%")
     for i in range(1, len(spelling)):
         suffix = spelling[i:].lower()
         DeleteFromIndex(indexDb, "ndefsuf%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
@@ -298,8 +298,6 @@ def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
             parsingState = "compilationDbPath is not set"
             return
 
-        indexDb = IndexDbOpen(indexDbPath, readOnly = False, create = True)
-
         additionalInclude = getBuiltinHeaderPath(clangLibraryPath)
 
         if additionalInclude == None:
@@ -307,24 +305,30 @@ def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
             return
 
         while True:
-            with file(compilationDbPath) as f:
-                compDb = json.loads(f.read())
+            try:
+                indexDb = IndexDbOpen(indexDbPath, readOnly = False, create = True)
 
-                index = Index.create()
+                with file(compilationDbPath) as f:
 
-                # on the first scan we parse both headers and symbols
-                for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
+                    compDb = json.loads(f.read())
 
-                # add all the header files to the compilation database we use
-                for key, value in IndexDbRangeIter(indexDb, "h%%%"):
-                    compDb.append({'command': value, 'file': ExtractPart(key, 2)})
+                    index = Index.create()
 
-                # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
-                for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
+                    # on the first scan we parse both headers and symbols
+                    for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
+                        ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
 
-            parsingState = "Sleeping"
+                    # add all the header files to the compilation database we use
+                    for key, value in IndexDbRangeIter(indexDb, "h%%%"):
+                        compDb.append({'command': value, 'file': ExtractPart(key, 2)})
+
+                    # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
+                    for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
+                        ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
+
+                parsingState = "Sleeping"
+            except leveldb.LevelDBError:
+                parsingState = "Failed to write to LevelDB. Likely there is a concurrent VIM instance updating index."
             time.sleep(10)
     except Exception as e:
         parsingState = "Failed with %s" % (str(e))
@@ -408,8 +412,8 @@ parseLock = threading.Lock()
 parseFile = ""
 parseContent = ""
 parseNeeded = False
-parseLastFile = ""
-parseTu = None
+
+parseTus = {}
 
 def ParseCurrentFileThread(clangLibraryPath, indexDbPath):
     global parsingCurrentState
@@ -440,7 +444,7 @@ def ParseCurrentFile(indexDb, additionalInclude):
     global parseContent
     global parseNeeded
     global parseLastFile
-    global parseTu
+    global parseTus
     global parsingCurrentState
 
     with parseLock:
@@ -466,8 +470,7 @@ def ParseCurrentFile(indexDb, additionalInclude):
     tu = index.parse(None, command.split() + ["-I%s" % additionalInclude], unsaved_files=[(fileToParse, contentToParse)])
 
     with parseLock:
-        parseTu = tu
-        parseLastFile = fileToParse
+        parseTus[fileToParse] = tu
         parsingCurrentState = "Parsed %s" % fileToParse
 
 def RequestParse():
@@ -481,14 +484,17 @@ def RequestParse():
             parseContent = "\n".join(vim.current.buffer[:] + ["\n"])
             parseNeeded = True
 
+def CtrlKBufferUnload(s):
+    parseTus.pop(s, None)
+
 def GetCurrentTranslationUnit():
     global parseLock
     global parseLastFile
-    global parseTu
+    global parseTus
     with parseLock:
         curName = vim.current.buffer.name
-        if curName is not None and curName == parseLastFile:
-            return parseTu
+        if curName is not None and curName in parseTus:
+            return parseTus[curName]
         return None
 
 def GetCurrentUsr(tu):

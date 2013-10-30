@@ -8,13 +8,6 @@ catch /E117/
 endtry
 
 try
-  call fuf#suffixNumber('')
-catch /E117/
-  echoerr '***** Please install FuzzyFinder plugin *****'
-  finish
-endtry
-
-try
   python import clang
 catch
   echoerr '***** Please install clang module for python *****'
@@ -40,6 +33,13 @@ function! CtrlKNavigate(entry, mode)
 endfunction
 
 function! CtrlKNavigateSymbols()
+    try
+      call fuf#suffixNumber('')
+    catch /E117/
+      echoerr '***** Please install FuzzyFinder plugin *****'
+      finish
+    endtry
+
     let s:my_items = []
     call fuf#fufctrlk#launch('', 1, 'navigate C++>', {'onComplete': function('CtrlKNavigate')}, s:my_items, 0)
 endfunction
@@ -81,6 +81,10 @@ function! s:ReadyToParse()
     python RequestParse()
 endfunction
 
+function! s:OnBufferUnload(fname)
+    python CtrlKBufferUnload(vim.eval('a:fname'))
+endfunction
+
 function! s:UpdateCurrentScope()
     python vim.command('let b:current_scope = "' + GetCurrentScopeStr() + '"')
 endfunction
@@ -92,6 +96,7 @@ function! s:CtrlKInitBuffer()
         autocmd!
         autocmd VimLeave * python LeaveCtrlK()
         au CursorHold,CursorHoldI,InsertLeave,BufEnter,BufRead,FileType <buffer> call <SID>ReadyToParse()
+        au BufUnload <buffer> call <SID>OnBufferUnload(expand('<afile>:p'))
 "        au CursorMoved,CursorMovedI <buffer> call <SID>UpdateCurrentScope()
     augroup END
 endfunction
