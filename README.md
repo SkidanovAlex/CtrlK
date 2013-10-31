@@ -13,8 +13,6 @@ Supported features are:
 
 3. Find References
 
-Current limitations: only one instance of vim per project works properly.
-
 Installation
 ------------
 The easiest way to install CtrlK is to use Vundle.
@@ -29,8 +27,10 @@ If you install it manually instead, make sure that l9 and FuzzyFinder are instal
 
 You might also need to install leveldb and clang modules for python:
 
-  ```sudo pip install leveldb
-  sudo pip install clang```
+  ```bash
+  sudo pip install leveldb
+  sudo pip install clang
+  ```
 
 Configuration
 -------------
