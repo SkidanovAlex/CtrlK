@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 import ctypes
+import socket
 
 from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor, TranslationUnit
 
@@ -55,6 +56,7 @@ clangLibraryPath = None
 indexDbPath = None
 compilationDbPath = None
 updateProcess = None
+listeningProcess = None
 updateFileProcess = None
 
 parsingState = ""
@@ -120,15 +122,31 @@ def IndexDbOpen(path, readOnly, create = False):
         return dbInstance
 
 def IndexDbRangeIter(conn, startWith = None):
-    if startWith != None:
-        if startWith[-1] == '%':
-            firstExcl = startWith[:-1] + '^'
-        else: 
-            firstExcl = startWith + "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    else:
-        firstExcl = None
-    for key, value in conn.RangeIter(startWith, firstExcl, True):
-        yield key, value
+    if conn is not None:
+        if startWith != None:
+            if startWith[-1] == '%':
+                firstExcl = startWith[:-1] + '^'
+            else: 
+                firstExcl = startWith + "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+        else:
+            firstExcl = None
+        for key, value in conn.RangeIter(startWith, firstExcl, True):
+            yield key, value
+    else: # connect to master vim instance
+        sockfile = GetSocketFileName()
+        if os.path.exists(sockfile):
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(sockfile)
+            client.send("range\n")
+            client.send(startWith + "\n")
+            gen = SocketStreamReader(client)
+            for it in range(51): # never try to receive more than 51 entries (50 real and one final "DONE")
+                client.send("MORE\n")
+                key = gen.next()
+                if not key or key == "DONE":
+                    break
+                value = gen.next()
+                yield key, value
 
 def IndexDbDelete(conn, key):
     conn.Delete(key)
@@ -137,10 +155,19 @@ def IndexDbPut(conn, key, value):
     conn.Put(key, value)
 
 def IndexDbGet(conn, key, default=None):
-    try:
-        return conn.Get(key)
-    except KeyError:
-        return default
+    if conn is not None:
+        try:
+            return conn.Get(key)
+        except KeyError:
+            return default
+    else: # connect to master vim instance
+        sockfile = GetSocketFileName()
+        if os.path.exists(sockfile):
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(sockfile)
+            client.send("get\n")
+            client.send(key + "\n")
+            return SocketStreamReader(client).next()
 
 def ResetIndex():
     global indexDbPath
@@ -155,6 +182,75 @@ def DeleteFromIndex(indexDb, pattern, callback = None):
         IndexDbDelete(indexDb, key)
         if callback != None:
             callback(indexDb, key)
+
+# ==== Supporting multiple instances of VIM: one VIM is works with LevelDB directly, others communicate to it via socket file
+def GetSocketFileName():
+    global indexDbPath
+
+    if indexDbPath is None:
+        return None
+
+    return os.path.join(indexDbPath, "ctrlk_socket")
+
+def SocketStreamReader(conn):
+    buf = ""
+    while True:
+        data = conn.recv(1024)
+        if not data:
+            yield buf
+            break
+        buf += data
+        if '\n' in buf:
+            tokens = buf.split('\n')
+            for token in tokens[:-1]:
+                yield token
+            buf = tokens[-1]
+
+def DbListener():
+    # Try to get the db access. If there's another VIM open, we won't succeed.
+    while True:
+        try:
+            indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+            break
+        except leveldb.LevelDBError:
+            time.sleep(10)
+
+    # Now we are the master VIM instance
+    sockfile = GetSocketFileName()
+    if sockfile == None:
+        return
+
+    if os.path.exists(sockfile):
+        os.remove(sockfile)
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(sockfile)
+    server.listen(5)
+
+    while True:
+        conn, addr = server.accept()
+        gen = SocketStreamReader(conn)
+        try:
+            data = gen.next()
+            if data:
+                if data == 'get':
+                    key = gen.next()
+                    if key:
+                        conn.send(IndexDbGet(indexDb, key, "") + "\n")
+
+                elif data == 'range':
+                    key = gen.next()
+                    if key:
+                        for k, v in IndexDbRangeIter(indexDb, key):
+                            if gen.next() == "MORE":
+                                conn.send(k + "\n")
+                                conn.send(v + "\n")
+                            else:
+                                break
+                        if gen.next() == "MORE":
+                            conn.send("DONE\n")
+        except StopIteration:
+            pass
 
 # ==== Maintaining the index
 
@@ -309,31 +405,36 @@ def UpdateCppIndexThread(clangLibraryPath, indexDbPath, compilationDbPath):
             parsingState = "Cannot find clang includes"
             return
 
+        # Try to get the db access. If there's another VIM open, we won't succeed.
         while True:
             try:
                 indexDb = IndexDbOpen(indexDbPath, readOnly = False, create = True)
-
-                with file(compilationDbPath) as f:
-
-                    compDb = json.loads(f.read())
-
-                    index = Index.create()
-
-                    # on the first scan we parse both headers and symbols
-                    for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                        ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
-
-                    # add all the header files to the compilation database we use
-                    for key, value in IndexDbRangeIter(indexDb, "h%%%"):
-                        compDb.append({'command': value, 'file': ExtractPart(key, 2)})
-
-                    # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
-                    for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
-                        ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
-
-                parsingState = "Sleeping"
+                break
             except leveldb.LevelDBError:
                 parsingState = "Failed to write to LevelDB. Likely there is a concurrent VIM instance updating index."
+                time.sleep(10)
+
+        while True:
+            parsingState = "Ready to parse"
+            with file(compilationDbPath) as f:
+
+                compDb = json.loads(f.read())
+
+                index = Index.create()
+
+                # on the first scan we parse both headers and symbols
+                for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
+                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = True)
+
+                # add all the header files to the compilation database we use
+                for key, value in IndexDbRangeIter(indexDb, "h%%%"):
+                    compDb.append({'command': value, 'file': ExtractPart(key, 2)})
+
+                # on the second scan we only parse symbols (it should only parse the headers added after the first scan)
+                for fileName, command, lastModified in IterateOverFiles(compDb, indexDb):
+                    ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders = False)
+
+            parsingState = "Sleeping"
             time.sleep(10)
     except Exception as e:
         parsingState = "Failed with %s" % (str(e))
@@ -384,7 +485,10 @@ def GetItemsMatchingPattern(prefix, limit):
 
     ordinal = 0
     try:
-        indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+        try:
+            indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+        except leveldb.LevelDBError:
+            indexDb = None
 
         for key, value in IndexDbRangeIter(indexDb, 'F%%%' + prefix.lower()):
             if limit > 0:
@@ -433,7 +537,10 @@ def ParseCurrentFileThread(clangLibraryPath, indexDbPath):
             parsingCurrentState = "indexDbPath is not set"
             return
 
-        indexDb = IndexDbOpen(indexDbPath, readOnly = True, create = True)
+        try:
+            indexDb = IndexDbOpen(indexDbPath, readOnly = True, create = True)
+        except leveldb.LevelDBError:
+            indexDb = None
 
         while True:
             time.sleep(0.1)
@@ -521,7 +628,11 @@ def GetCurrentUsrCursor(tu):
 def GoToDefinition():
     global indexDbPath
     if indexDbPath == None: return
-    indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+
+    try:
+        indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+    except leveldb.LevelDBError:
+        indexDb = None
 
     tu = GetCurrentTranslationUnit()
     if tu is not None:
@@ -549,7 +660,11 @@ def GoToDefinition():
 def FindReferences():
     global indexDbPath
     if indexDbPath == None: return
-    indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+
+    try:
+        indexDb = IndexDbOpen(indexDbPath, readOnly = True)
+    except leveldb.LevelDBError:
+        indexDb = None
 
     ret = []
     tu = GetCurrentTranslationUnit()
@@ -595,6 +710,7 @@ def InitCtrlK(libraryPath):
     global parsingState
     global parsingCurrentState
     global updateProcess
+    global listeningProcess
     global updateFileProcess
 
     clangLibraryPath = libraryPath
@@ -619,33 +735,16 @@ def InitCtrlK(libraryPath):
         updateProcess.daemon = True
         updateProcess.start()
 
+        listeningProcess = threading.Thread(target=DbListener, args=())
+        listeningProcess.daemon = True
+        listeningProcess.start()
+
         updateFileProcess = threading.Thread(target=ParseCurrentFileThread, args=(clangLibraryPath, indexDbPath))
         updateFileProcess.daemon = True
         updateFileProcess.start()
 
-def terminate_thread(thread):
-    if not thread.isAlive():
-        return
-
-    exc = ctypes.py_object(SystemExit)
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-        ctypes.c_long(thread.ident), exc)
-    if res == 0:
-        raise ValueError("nonexistent thread id")
-    elif res > 1:
-        # """if it returns a number greater than one, you're in trouble,
-        # and you should call it again with exc=NULL to revert the effect"""
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(thread.ident, None)
-        raise SystemError("PyThreadState_SetAsyncExc failed")
-
 def LeaveCtrlK():
-    global updateProcess
-    global updateFileProcess
-
-    if updateProcess:
-        terminate_thread(updateProcess)
-    if updateFileProcess:
-        terminate_thread(updateFileProcess)
+    pass
 
 def GetCtrlKState():
     global parsingState
