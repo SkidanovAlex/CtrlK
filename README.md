@@ -50,7 +50,7 @@ F3 is showing the current state of the indexer and background parsing thread in 
 
   ```Index: <status of the indexer> / Current: <status of the parsing thread>```
 
-Note that CtrlK's indexer is rather slow. Indexing your project first time can take a considerable amount of time. Pressing Ctrl+F2 will tell you which file is being parsed right now. When all the files are parsed, Ctrl+F2 will print "Sleeping" as the indexer status.
+Note that CtrlK's indexer is rather slow. Indexing your project first time can take a considerable amount of time. Pressing F3 will tell you which file is being parsed right now. When all the files are parsed, F3 will print "Sleeping" as the indexer status.
 
 Compilation database
 --------------------
