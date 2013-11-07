@@ -183,7 +183,7 @@ def DeleteFromIndex(indexDb, pattern, callback = None):
         if callback != None:
             callback(indexDb, key)
 
-# ==== Supporting multiple instances of VIM: one VIM is works with LevelDB directly, others communicate to it via socket file
+# ==== Supporting multiple instances of VIM: one VIM is working with LevelDB directly, others communicate to it via socket file
 def GetSocketFileName():
     global indexDbPath
 
@@ -293,7 +293,7 @@ def DbEntryPrefix(pos, node):
         ret += "suf"
     return ret
 
-def ExtractSymbols(indexDb, fileName, node, parentSpelling):
+def ExtractSymbols(indexDb, fileName, node):
     if node.location.file != None and os.path.normpath(node.location.file.name) != os.path.normpath(fileName):
         return
 
@@ -312,19 +312,25 @@ def ExtractSymbols(indexDb, fileName, node, parentSpelling):
                 if symbol and not spelling:
                     spelling = node.displayname
             if symbol and spelling:
-                if parentSpelling != "": parentSpelling += "::"
-                parentSpelling += spelling
                 IndexDbPut(indexDb, "spelling%%%" + symbol, spelling)
                 IndexDbPut(indexDb, "c%%%" + fileName + "%%%" + symbol, '1')
                 IndexDbPut(indexDb, "s%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column), str(GetNodeUseType(node)))
+
+                displayname = node.displayname
+                parent = node.semantic_parent
+                while parent:
+                    if parent.spelling:
+                        displayname = parent.spelling + "::" + displayname
+                    parent = parent.semantic_parent
+                    
                 if addToN:
                     for i in range(len(spelling)):
                         suffix = spelling[i:].lower()
-                        IndexDbPut(indexDb, DbEntryPrefix(i, node) + "%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + node.displayname, str(GetNodeUseType(node)))
+                        IndexDbPut(indexDb, DbEntryPrefix(i, node) + "%%%" + suffix + "%%%" + symbol + "%%%" + fileName + "%%%" + str(node.location.line) + "%%%" + str(node.location.column) + "%%%" + displayname, str(GetNodeUseType(node)))
         except ValueError:
             pass
     for c in node.get_children():
-        ExtractSymbols(indexDb, fileName, c, parentSpelling)
+        ExtractSymbols(indexDb, fileName, c)
 
 def GetSymbolSpelling(indexDb, symbol):
     return IndexDbGet(indexDb, "spelling%%%" + symbol, default = "(not found)")
@@ -379,7 +385,7 @@ def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude
         # parse symbols
         DeleteFromIndex(indexDb, "c%%%" + fileName + "%%%", RemoveSymbol)
 
-        ExtractSymbols(indexDb, fileName, tu.cursor, "")
+        ExtractSymbols(indexDb, fileName, tu.cursor)
 
         IndexDbPut(indexDb, 'f%%%' + fileName, str(lastModified))
 
