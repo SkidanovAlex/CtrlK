@@ -26,7 +26,7 @@ au FileType c,cpp,objc,objcpp call <SID>CtrlKInitBuffer()
 call l9#defineVariableDefault('g:ctrlk_clang_library_path'        , '')
 
 let s:plugin_path = escape(expand('<sfile>:p:h'), '\')
-exe 'pyfile ' . fnameescape(s:plugin_path) . '/ctrlk.py'
+exe 'pyfile ' . fnameescape(s:plugin_path) . '/ctrlk_plugin.py'
 
 function! CtrlKNavigate(entry, mode)
     python NavigateToEntry(vim.eval('a:entry'))
