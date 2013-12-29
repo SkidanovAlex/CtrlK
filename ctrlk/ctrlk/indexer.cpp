@@ -622,6 +622,19 @@ PyObject* wait_on_work(PyObject* self, PyObject* args)
     Py_RETURN_NONE;
 }
 
+PyObject* work_queue_size(PyObject* self, PyObject* args)
+{
+    int ret = 0;
+
+    Py_BEGIN_ALLOW_THREADS;
+    pthread_mutex_lock(&g_worklock);
+    ret = g_outstandingTasks;
+    pthread_mutex_unlock(&g_worklock);
+    Py_END_ALLOW_THREADS;
+
+    return Py_BuildValue("i", ret);
+}
+
 PyObject* extract_part(PyObject* self, PyObject* args)
 {
     const char* s = nullptr;
@@ -650,12 +663,14 @@ PyObject* remove_file_symbols(PyObject* self, PyObject* args)
     RemoveFileSymbols(std::string(s));
     Py_RETURN_NONE;
 }
+
 static PyMethodDef IndexerMethods[] = {
     {"start", start, METH_VARARGS, "Fill in."},
     {"add_file_to_parse", add_file_to_parse, METH_VARARGS, "Fill in."},
     {"wait_on_work", wait_on_work, METH_VARARGS, "Fill in."},
     {"extract_part", extract_part, METH_VARARGS, "Fill in."},
     {"remove_file_symbols", remove_file_symbols, METH_VARARGS, "Fill in."},
+    {"work_queue_size", work_queue_size, METH_VARARGS, "Fill in."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 

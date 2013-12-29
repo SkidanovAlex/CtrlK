@@ -124,7 +124,6 @@ def get_items_matching_pattern(conn, prefix, limit):
     for dbPrefix in ["ndef", "ndefsuf", "ndecl", "ndeclsuf"]:
         for key, value in leveldb_range_iter(conn, dbPrefix + '%%%' + prefix.lower()):
             if limit > 0:
-                print key
                 ret.append(extract_part(key, 6) + " - " + get_reference_kind(int(value)) + " from " + (extract_part(key, 3)) + " [" + str(ordinal) + "]")
                 locations.append([extract_part(key, 3), int(extract_part(key, 4)), int(extract_part(key, 5))])
                 ordinal += 1

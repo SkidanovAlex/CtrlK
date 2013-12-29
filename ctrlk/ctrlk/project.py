@@ -26,15 +26,16 @@ class Project(object):
         if self.builtin_header_path is None:
             raise Exception("Cannot find clang includes")
 
-        self.project_root = os.path.abspath(project_root)
+        project_root = os.path.abspath(project_root)
 
-        curr_path = self.project_root
+        curr_path = project_root
         self.compile_commands_path = None
         while curr_path:
             compile_commands_path = os.path.join(curr_path, 'compile_commands.json')
             if os.path.exists(compile_commands_path):
                 self.compile_commands_path = compile_commands_path
                 self.index_db_path = os.path.join(curr_path, '.ctrlk-index')
+                self.project_root = curr_path
                 break
             elif curr_path == '/':
                 break
@@ -42,7 +43,7 @@ class Project(object):
 
         if self.compile_commands_path is None:
             raise Exception("Could not find a 'compile_commands.json' file in the " +\
-                                "directory hierarchy from '%s'" % (self.project_root))
+                                "directory hierarchy from '%s'" % (project_root))
 
         self._compilation_db = None
         self._compilation_db_modtime = 0
@@ -129,6 +130,9 @@ class Project(object):
 
     def wait_on_work(self):
         indexer.wait_on_work()
+
+    def work_queue_size(self):
+        return indexer.work_queue_size()
 
 def get_file_modtime(file_name):
     return int(os.path.getmtime(file_name))

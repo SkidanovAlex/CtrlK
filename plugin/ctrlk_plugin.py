@@ -5,14 +5,19 @@ import time
 import traceback
 import ctypes
 import socket
+import subprocess
+import sys
 
 from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor, TranslationUnit
 
-from ctrlk import project
+import requests
+from ctrlk import client_api
 from ctrlk import search
+from ctrlk import ctrlk_server
 
-g_project = None
+g_api = None
 
+g_builtin_header_path = None
 updateProcess = None
 listeningProcess = None
 updateFileProcess = None
@@ -21,89 +26,15 @@ parsingState = ""
 parsingCurrentState = ""
 jumpState = "normal"
 
-#def ResetIndex():
-#    global indexDbPath
-#    if indexDbPath == None: return
-#    indexDb = IndexDbOpen(indexDbPath, readOnly = False)
-#    for key, value in IndexDbRangeIter(indexDb):
-#        IndexDbDelete(indexDb, key)
-#
-#def DeleteFromIndex(indexDb, pattern, callback = None):
-#    assert pattern[-1] == '%'
-#    for key, value in IndexDbRangeIter(indexDb, pattern):
-#        IndexDbDelete(indexDb, key)
-#        if callback != None:
-#            callback(indexDb, key)
-
-#def GetSymbolSpelling(indexDb, symbol):
-#    return IndexDbGet(indexDb, "spelling%%%" + symbol, default = "(not found)")
-#
-#def RemoveSymbol(indexDb, key):
-#    symbol = search.extract_part(key, 2)
-#    fname = search.extract_part(key, 1)
-#    spelling = GetSymbolSpelling(indexDb, symbol)
-#
-#    DeleteFromIndex(indexDb, "s%%%" + symbol + "%%%" + fname + "%%%")
-#    DeleteFromIndex(indexDb, "ndef%%%" + spelling.lower() + "%%%" + symbol + "%%%" + fname + "%%%")
-#    DeleteFromIndex(indexDb, "ndecl%%%" + spelling.lower() + "%%%" + symbol + "%%%" + fname + "%%%")
-#    for i in range(1, len(spelling)):
-#        suffix = spelling[i:].lower()
-#        DeleteFromIndex(indexDb, "ndefsuf%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
-#        DeleteFromIndex(indexDb, "ndeclsuf%%%" + suffix + "%%%" + symbol + "%%%" + fname + "%%%")
-    
-
-#def ParseFile(index, command, indexDb, fileName, lastModified, additionalInclude, parseHeaders):
-#    global parsingState
-#
-#    lastKnown = int(IndexDbGet(indexDb, 'f%%%' + fileName, default = 0))
-#
-#    if lastKnown < lastModified:
-#        parsingState = "Parsing %s" % fileName
-#
-#        IndexDbPut(indexDb, 'F%%%' + os.path.basename(fileName).lower() + "%%%" + fileName, '1')
-#        try:
-#            tu = index.parse(None, command + ["-I%s" % additionalInclude], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
-#        except TranslationUnitLoadError as e:
-#            # TODO: handle failure
-#            return
-#
-#        # set it to zero so that if we crash or stop while parse, it is reparsed when we are restarted
-#        IndexDbPut(indexDb, 'f%%%' + fileName, str(0))
-#
-#        for x in tu.diagnostics:
-#            if x.severity >= 3:
-#                # TODO: remember errors
-#                pass
-#
-#        # parse headers
-#        DeleteFromIndex(indexDb, "h%%%" + fileName + "%%%")
-#        includes = set()
-#        for incl in tu.get_includes():
-#            if incl.include:
-#                includes.add(os.path.normpath(incl.include.name))
-#
-#        for incl in includes:
-#            IndexDbPut(indexDb, "h%%%" + fileName + "%%%" + incl, ' '.join(command))
-#
-#        # parse symbols
-#        DeleteFromIndex(indexDb, "c%%%" + fileName + "%%%", RemoveSymbol)
-#
-#        ExtractSymbols(indexDb, fileName, tu.cursor)
-#
-#        IndexDbPut(indexDb, 'f%%%' + fileName, str(lastModified))
-#
-#        parsingState = "Looking for files to parse"
-
 def UpdateCppIndexThread():
     global parsingState
 
     try:
         while True:
-            start_time = time.time()
-            g_project.scan_and_index()
-            g_project.wait_on_work()
-            end_time = time.time()
-            parsingState = "sleeping (last sweep = %g)" % (end_time-start_time)
+            queue_size = g_api.get_queue_size()
+            if queue_size <= 1:
+                g_api.parse()
+            parsingState = "Parse Queue Size = %d" % (queue_size)
             time.sleep(10)
     except Exception as e:
         parsingState = "Failed with %s" % (str(e))
@@ -116,9 +47,15 @@ lastLocations = []
 lastRet = []
 
 def GetItemsMatchingPattern(prefix, limit):
+    if not g_api:
+        return ["CtrlK is not Running"]
+
     global lastRet, lastLocations
     global jumpState
-    lastRet, lastLocations = search.get_items_matching_pattern(g_project.leveldb_connection, prefix, limit)
+    try:
+        lastRet, lastLocations = g_api.get_items_matching_pattern(prefix, limit)
+    except Exception as e:
+        return [str(e)]
     return lastRet
 
 def JumpTo(filename, line, column):
@@ -164,6 +101,7 @@ def ParseCurrentFileThread():
             ParseCurrentFile()
     except Exception as e:
         parsingCurrentState = "Failed with %s" % (traceback.format_exc(e))
+        pass
     except SystemExit as e:
         pass
 
@@ -176,6 +114,9 @@ def ParseCurrentFile():
     global parseTus
     global parsingCurrentState
 
+    if not g_api:
+        return
+
     with parseLock:
         if not parseNeeded:
             return
@@ -184,14 +125,18 @@ def ParseCurrentFile():
         parseNeeded = False
         parsingCurrentState = "Parsing %s" % fileToParse
 
-    _, command, _ = g_project.get_file_args(fileToParse)
+    try:
+        command = g_api.get_file_args(fileToParse)
+    except Exception as e:
+        parsingCurrentState = str(e)
+        return
 
     if command == None:
         parsingCurrentState = "Can't find command line arguments"
         return
 
     index = Index.create()
-    tu = index.parse(None, command + ["-I%s" % g_project.builtin_header_path], unsaved_files=[(fileToParse, contentToParse)], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
+    tu = index.parse(None, command + ["-I%s" % g_builtin_header_path], unsaved_files=[(fileToParse, contentToParse)], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
 
     with parseLock:
         parseTus[fileToParse] = tu
@@ -238,15 +183,22 @@ def GetCurrentUsrCursor(tu):
     return cursor.referenced
 
 def GoToDefinition():
+    global parsingCurrentState
+
+    if not g_api:
+        return
     tu = GetCurrentTranslationUnit()
     if tu is not None:
         cursor = GetCurrentUsrCursor(tu)
         if cursor is not None:
             usr = cursor.get_usr()
-            for k, v in search.leveldb_range_iter(g_project.leveldb_connection, "s%%%" + usr + "%%%"):
-                if int(v) < 0:
-                    JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
-                    return
+            try:
+                for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
+                    if int(v) < 0:
+                        JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
+                        return
+            except Exception as e:
+                parsingCurrentState = str(e)
 
             # For macros is_definition is always false => we always store their type as a positive number =>
             #    condition in the loop above is always false. It is actually a good thing, because in case
@@ -262,17 +214,23 @@ def GoToDefinition():
 
 
 def FindReferences():
+    global parsingCurrentState
+    if not g_api:
+        return
     ret = []
     tu = GetCurrentTranslationUnit()
     if tu is not None:
         cursor = GetCurrentUsrCursor(tu)
         if cursor is not None:
             usr = cursor.get_usr()
-            for k, v in search.leveldb_range_iter(g_project.leveldb_connection, "s%%%" + usr + "%%%"):
-                fileName = search.extract_part(k, 2)
-                line = int(search.extract_part(k, 3))
-                col = int(search.extract_part(k, 4))
-                ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': search.get_reference_kind(int(v)), 'kind': abs(int(v))})
+            try:
+                for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
+                    fileName = search.extract_part(k, 2)
+                    line = int(search.extract_part(k, 3))
+                    col = int(search.extract_part(k, 4))
+                    ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': search.get_reference_kind(int(v)), 'kind': abs(int(v))})
+            except Exception as e:
+                parsingCurrentState = str(e)
 
     return ret
 
@@ -299,22 +257,47 @@ def GetCurrentScopeStr():
   
     return GetCurrentScopeStrInternal(tu.cursor, line)
 
-def InitCtrlK(libraryPath):
-    global g_project
+def try_initialize(libraryPath):
+    global g_api
+    global parsingState
+
+    try:
+        g_api = client_api.CtrlKApi()
+        g_api.register(libraryPath, os.path.abspath(os.getcwd()))
+        return True
+    except Exception as e:
+        g_api = None
+        parsingState = "CtrlK Failed to Initialize: %s" % (str(e))
+        return False
+
+def api_init_thread(libraryPath):
+    global g_api
+    global g_builtin_header_path
     global parsingState
     global parsingCurrentState
     global updateProcess
     global updateFileProcess
 
-    start_time = time.time()
-    try:
-        g_project = project.Project(libraryPath, os.path.abspath(os.getcwd()))
-    except Exception as e:
-        parsingState = str(e)
-        return
-    end_time = time.time()
+    Config.set_library_path(libraryPath)
+    Config.set_compatibility_check(False)
+
+    if not try_initialize(libraryPath):
+        server_path = ctrlk_server.get_absolute_path()
+        with open('/tmp/ctrlk_server_stdout', 'a') as server_stdout:
+            with open('/tmp/ctrlk_server_stderr', 'a') as server_stderr:
+                subprocess.Popen(['python', server_path, '--port', str(client_api.DEFAULT_PORT), '--suicide-seconds', '3600'],\
+                        stdout=server_stdout, stderr=server_stderr)
+
+        for i in range(100):
+            if try_initialize(libraryPath):
+                break
+            time.sleep(0.1)
+        else:
+            return
     
-    parsingState = "Ready to parse %g" % (end_time-start_time)
+    g_builtin_header_path = g_api.get_builtin_header_path()
+
+    parsingState = "Ready to parse"
     parsingCurrentState = "Ready to parse"
 
     if updateProcess == None:
@@ -325,6 +308,11 @@ def InitCtrlK(libraryPath):
         updateFileProcess = threading.Thread(target=ParseCurrentFileThread)
         updateFileProcess.daemon = True
         updateFileProcess.start()
+
+def InitCtrlK(libraryPath):
+    t = threading.Thread(target=api_init_thread, args=(libraryPath,))
+    t.daemon = True
+    t.start()
 
 def LeaveCtrlK():
     pass
