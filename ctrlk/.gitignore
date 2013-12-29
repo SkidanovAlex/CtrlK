@@ -1,7 +1,6 @@
 libclang_index.so.1.0
 a.out
 clang-indexer-db
-Makefile
 .cproject
 .project
 CMakeFiles/
