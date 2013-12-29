@@ -102,22 +102,28 @@ class Project(object):
     def scan_and_index(self):
         project_files = self.compilation_db
         for file_name, compile_command in project_files.items():
-            mod_time = get_file_modtime(file_name)
+            try:
+                mod_time = get_file_modtime(file_name)
+            except OSError:
+                continue
             indexer.add_file_to_parse(file_name, compile_command, mod_time)
 
         cpp_files_to_reparse = set()
         for header_file_key, origin_file_name in search.leveldb_range_iter(self.leveldb_connection, "h%%%"):
             header_file_name = search.extract_part(header_file_key, 1)
             saved_mod_time = int(self.leveldb_connection.Get("f%%%" + header_file_name))
-            real_mod_time = get_file_modtime(header_file_name)
+
+            try:
+                real_mod_time = get_file_modtime(header_file_name)
+            except OSError:
+                indexer.remove_file_symbols(header_file_name)
+                continue
 
             if real_mod_time <= saved_mod_time:
                 continue
 
-            print header_file_name, "real", real_mod_time, "saved", saved_mod_time
             compile_command = project_files[origin_file_name]
             if origin_file_name not in cpp_files_to_reparse:
-                print "Reparsing %s for %s" % (origin_file_name, header_file_name)
                 cpp_files_to_reparse.add(origin_file_name)
                 indexer.add_file_to_parse(origin_file_name, compile_command, real_mod_time)
 
