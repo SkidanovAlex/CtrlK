@@ -14,7 +14,7 @@ build: .FORCE py-leveldb
 test: build
 	python test_cpp_indexer.py
 
-clean_test:
+clean_test: build
 	rm -rf ~/memsql/.ctrlk-index && python test_cpp_indexer.py
 
 py-leveldb:

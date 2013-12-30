@@ -64,6 +64,12 @@ std::string BaseName(std::string fileName)
     }
 }
 
+std::string StringToLower(std::string str)
+{
+    std::transform(str.begin(), str.end(), str.begin(), ::tolower);
+    return str;
+}
+
 std::string ExtractPart(std::string s, int ordinal)
 {
     std::string delimiter = "%%%";
@@ -84,7 +90,7 @@ std::string ExtractPart(std::string s, int ordinal)
 
     if (i == ordinal)
     {
-        return s.substr(pos, nextpos-pos);
+        return s.substr(pos);
     }
 
     assert(false);
@@ -112,10 +118,10 @@ struct CompileCommand
 
     void Clear()
     {
-        delete fileName;
+        free(fileName);
         for (int i = 0; i < nargs; i++)
         {
-            delete args[i];
+            free(args[i]);
         }
         delete[] args;
         args = nullptr;
@@ -223,7 +229,7 @@ void SaveParsedFile(std::string fileName, time_t modTime)
     char buf[100];
     snprintf(buf, sizeof(buf), "%ld", modTime);
     db->Put(leveldb::WriteOptions(), std::string("f%%%") + fileName, std::string(buf));
-    db->Put(leveldb::WriteOptions(), std::string("F%%%") + BaseName(fileName)
+    db->Put(leveldb::WriteOptions(), std::string("F%%%") + StringToLower(BaseName(fileName))
             + std::string("%%%") + fileName, std::string("1"));
 }
 
