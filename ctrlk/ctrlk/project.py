@@ -18,8 +18,9 @@ class Project(object):
 
         self.clang_library_path = library_path
 
-        Config.set_library_path(self.clang_library_path)
-        Config.set_compatibility_check(False)
+        if not Config.loaded:
+            Config.set_library_path(self.clang_library_path)
+            Config.set_compatibility_check(False)
 
         self.builtin_header_path = getBuiltinHeaderPath(self.clang_library_path)
 
