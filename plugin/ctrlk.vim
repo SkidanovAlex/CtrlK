@@ -15,9 +15,9 @@ catch
 endtry
 
 try
-  python import leveldb
+  python import ctrlk
 catch
-  echoerr '***** Please install leveldb module for python *****'
+  echoerr '***** Please install ctrlk module for python *****'
   finish
 endtry
 
