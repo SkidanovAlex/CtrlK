@@ -7,6 +7,7 @@ import ctypes
 import socket
 import subprocess
 import sys
+import json
 
 from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor, TranslationUnit
 
@@ -72,6 +73,9 @@ def JumpTo(filename, line, column):
   else:
     vim.command("normal m'")
   vim.current.window.cursor = (line, column - 1)
+
+def FollowDef(filename, line):
+    vim.command("call CtrlKOpenFileInFollowWindow('%s', %d)" % (filename, line))
 
 def NavigateToEntry(entry):
     global lastLocations
@@ -182,7 +186,7 @@ def GetCurrentUsrCursor(tu):
         return None
     return cursor.referenced
 
-def GoToDefinition():
+def GoToDefinition(mode):
     global parsingCurrentState
 
     if not g_api:
@@ -195,7 +199,14 @@ def GoToDefinition():
             try:
                 for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
                     if int(v) < 0:
-                        JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
+                        if mode == 'j':
+                            vim.command('rightbelow split')
+                        elif mode == 'l':
+                            vim.command('rightbelow vsplit')
+                        if mode != 'f':
+                            JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
+                        else:
+                            FollowDef(search.extract_part(k, 2), int(search.extract_part(k, 3)))
                         return
             except Exception as e:
                 parsingCurrentState = str(e)
@@ -209,7 +220,10 @@ def GoToDefinition():
             # It is also a good fall back for the case when we cannot find someting in the database (file is
             #    not parsed yet, or failed to parse) -- we will jump to the visible declaration of the symbol
             #
-            JumpTo(cursor.location.file, cursor.location.line, cursor.location.column)
+            if mode != 'f':
+                JumpTo(cursor.location.file, cursor.location.line, cursor.location.column)
+            else:
+                FollowDef(cursor.location.file, cursor.location.line)
 
 
 
@@ -228,7 +242,24 @@ def FindReferences():
                     fileName = search.extract_part(k, 2)
                     line = int(search.extract_part(k, 3))
                     col = int(search.extract_part(k, 4))
-                    ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': search.get_reference_kind(int(v)), 'kind': abs(int(v))})
+
+                    kindText = search.get_reference_kind(int(v))
+                    text = "[   ]"
+                    if "DEFINITION" in kindText:
+                        text = "[DEF]"
+                    elif "declaration" in kindText:
+                        text = "[Dcl]"
+                    elif "reference" in kindText:
+                        text = "[ref]"
+
+                    try:
+                        with open(fileName) as f:
+                            lines = [x for x in f]
+                        text += ' %s' % lines[line - 1].strip()
+                    except:
+                        pass
+
+                    ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': text, 'kind': abs(int(v))})
             except Exception as e:
                 parsingCurrentState = str(e)
 

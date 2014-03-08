@@ -15,21 +15,20 @@ Supported features are:
 
 Installation
 ------------
-The easiest way to install CtrlK is to use Vundle.
+Before installing the ctrlk plugin, you need to install ctrlk python library, as well as leveldb and clang libraries:
+
+  ```bash
+  sudo pip install leveldb
+  sudo pip install clang
+  sudo pip install ctrlk
+  ```
+
+The easiest way to install CtrlK plugin itself is to use Vundle.
 
   ```vim
   Bundle 'L9'
   Bundle 'FuzzyFinder'
   Bundle 'SkidanovAlex/CtrlK'
-  ```
-
-If you install it manually instead, make sure that l9 and FuzzyFinder are installed before installing CtrlK
-
-You might also need to install leveldb and clang modules for python:
-
-  ```bash
-  sudo pip install leveldb
-  sudo pip install clang
   ```
 
 Configuration
@@ -52,11 +51,18 @@ F3 is showing the current state of the indexer and background parsing thread in 
 
 Note that CtrlK's indexer is rather slow. Indexing your project first time can take a considerable amount of time. Pressing F3 will tell you which file is being parsed right now. When all the files are parsed, F3 will print "Sleeping" as the indexer status.
 
+With the bindings above F2 opens the definition in the same window. If you want to open the definition in a new window after a split or a vsplit, use the following bindings:
+
+  ```vim
+  nmap <F4> :call CtrlKGoToDefinitionWithSplit('j')<CR>
+  nmap <F5> :call CtrlKGoToDefinitionWithSplit('k')<CR>
+  ```
+
 Compilation database
 --------------------
 CtrlK uses compilation databases to parse your project. If you use CMake, creating the compilation database is just a matter of running:
 
   ```cmake . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON```
 
-When you run vim, CtrlK will find the compilation database file that is closest to the current folder, and place its own index next to it.
+When you run vim, CtrlK will find the compilation database file that is closest to the current folder, and place its own index next to it into a `.ctrlk` folder.
 

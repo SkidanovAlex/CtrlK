@@ -60,11 +60,15 @@ function! CtrlKGetCurrentScope()
 endfunction
 
 function! CtrlKGoToDefinition()
-    python GoToDefinition()
+    python GoToDefinition('')
+endfunction
+
+function! CtrlKGoToDefinitionAndSplit(mode)
+    python GoToDefinition(vim.eval('a:mode'))
 endfunction
 
 function! CtrlKGetReferences()
-    python vim.command('let l:list = ' + str(FindReferences()))
+    python vim.command('let l:list = ' + json.dumps(FindReferences()))
     if !empty(l:list)
         copen
         call setqflist(l:list)
@@ -89,6 +93,30 @@ function! s:UpdateCurrentScope()
     python vim.command('let b:current_scope = "' + GetCurrentScopeStr() + '"')
 endfunction
 
+function! CtrlKStartFollowDefinition()
+    rightbelow 20split
+    if !exists('w:ctrlkfl') | let w:ctrlkfl=1 | endif
+endfunction
+
+function CtrlKOpenFileInFollowWindow(fname, line)
+    let l:saved = winnr()
+    for winnr in range(1, winnr('$'))
+        if getwinvar(winnr, 'ctrlkfl') is 1
+            execute winnr."wincmd w"
+            if expand('%') != a:fname
+                execute 'edit '.a:fname
+            endif
+            execute a:line
+            norm! zt
+            execute l:saved."wincmd w"
+            return
+        endif
+    endfor
+    call CtrlKStartFollowDefinition()
+    call CtrlKOpenFileInFollowWindow(a:fname, a:line)
+    execute l:saved."wincmd w"
+endfunction
+
 function! s:CtrlKInitBuffer()
     let b:my_changedtick = 0
 
@@ -98,6 +126,7 @@ function! s:CtrlKInitBuffer()
         au CursorHold,CursorHoldI,InsertLeave,BufEnter,BufRead,FileType <buffer> call <SID>ReadyToParse()
         au BufUnload <buffer> call <SID>OnBufferUnload(expand('<afile>:p'))
 "        au CursorMoved,CursorMovedI <buffer> call <SID>UpdateCurrentScope()
+        autocmd CursorMoved,CursorMovedI <buffer> call CtrlKGoToDefinitionAndSplit('f')
     augroup END
 endfunction
 
