@@ -126,7 +126,7 @@ function! s:CtrlKInitBuffer()
         au CursorHold,CursorHoldI,InsertLeave,BufEnter,BufRead,FileType <buffer> call <SID>ReadyToParse()
         au BufUnload <buffer> call <SID>OnBufferUnload(expand('<afile>:p'))
 "        au CursorMoved,CursorMovedI <buffer> call <SID>UpdateCurrentScope()
-        autocmd CursorMoved,CursorMovedI <buffer> call CtrlKGoToDefinitionAndSplit('f')
+"        autocmd CursorMoved,CursorMovedI <buffer> call CtrlKGoToDefinitionAndSplit('f')
     augroup END
 endfunction
 
