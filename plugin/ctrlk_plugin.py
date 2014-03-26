@@ -95,6 +95,7 @@ parseContent = ""
 parseNeeded = False
 
 parseTus = {}
+parseScopeNames = {}
 
 def ParseCurrentFileThread():
     global parsingCurrentState
@@ -109,6 +110,33 @@ def ParseCurrentFileThread():
     except SystemExit as e:
         pass
 
+def PopulateScopeNames(cursor, scopeNames, scopeDepths, depth = 0):
+    if cursor is None:
+        return
+    for ch in cursor.get_children():
+        if ch.extent and ch.extent.start and ch.extent.end and cursor.extent and cursor.extent.end:
+            if str(ch.extent.end.file) == str(cursor.extent.end.file):
+                if ch.spelling is not None:
+                    for i in range(ch.extent.start.line, ch.extent.end.line + 1):
+                        while len(scopeNames) <= i:
+                            scopeNames.append('')
+                            scopeDepths.append(-1)
+
+                        if scopeDepths[i] < depth: 
+                            scopeDepths[i] = depth
+                            if scopeNames[i] != '': scopeNames[i] += '::'
+                            scopeNames[i] += ch.spelling
+
+                PopulateScopeNames(ch, scopeNames, scopeDepths, depth + 1)
+
+def GetCursorForFile(tu, fileName):
+    cursor = tu.cursor
+    if str(cursor.extent.start.file) == str(cursor.extent.end.file) and os.path.abspath(str(cursor.extent.start.file)) == fileName:
+        return cursor
+
+    # TODO
+    return None
+
 def ParseCurrentFile():
     global parseLock
     global parseFile
@@ -116,6 +144,7 @@ def ParseCurrentFile():
     global parseNeeded
     global parseLastFile
     global parseTus
+    global parseScopeNames
     global parsingCurrentState
 
     if not g_api:
@@ -144,7 +173,15 @@ def ParseCurrentFile():
 
     with parseLock:
         parseTus[fileToParse] = tu
-        parsingCurrentState = "Parsed %s" % fileToParse
+        parsingCurrentState = "Partially parsed %s" % fileToParse
+
+    scopeNames = []
+    scopeDepths = []
+    PopulateScopeNames(GetCursorForFile(tu, os.path.abspath(fileToParse)), scopeNames, scopeDepths)
+
+    with parseLock:
+        parseScopeNames[fileToParse] = scopeNames
+        parsingCurrentState = "Fully parsed %s" % fileToParse
 
 def RequestParse():
     global parseLock
@@ -220,6 +257,10 @@ def GoToDefinition(mode):
             # It is also a good fall back for the case when we cannot find someting in the database (file is
             #    not parsed yet, or failed to parse) -- we will jump to the visible declaration of the symbol
             #
+            if mode == 'j':
+                vim.command('rightbelow split')
+            elif mode == 'l':
+                vim.command('rightbelow vsplit')
             if mode != 'f':
                 JumpTo(cursor.location.file, cursor.location.line, cursor.location.column)
             else:
@@ -265,28 +306,16 @@ def FindReferences():
 
     return ret
 
-def GetCurrentScopeStrInternal(cursor, pos):
-    for ch in cursor.get_children():
-        if ch.extent.start.line <= pos and ch.extent.end.line >= pos and str(ch.extent.end.file) == str(cursor.extent.end.file):
-            ret = ''
-            if ch.spelling is not None:
-              ret = ch.spelling
-            other = GetCurrentScopeStrInternal(ch, pos)
-            if '' != other:
-              if ret != '': ret += '::'
-              ret += other
-            if '' != ret:
-              return ret
-    return ''
-
 def GetCurrentScopeStr():
-    line, col = vim.current.window.cursor
-
-    tu = GetCurrentTranslationUnit()
-    if tu is None:
-        return ""
-  
-    return GetCurrentScopeStrInternal(tu.cursor, line)
+    global parseLock
+    global parseLastFile
+    global parseTus
+    with parseLock:
+        curName = vim.current.buffer.name
+        line, col = vim.current.window.cursor
+        if curName is not None and curName in parseScopeNames and line < len(parseScopeNames[curName]):
+            return parseScopeNames[curName][line]
+        return "(no scope)"
 
 def try_initialize(libraryPath):
     global g_api

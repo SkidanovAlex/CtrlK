@@ -58,6 +58,26 @@ With the bindings above F2 opens the definition in the same window. If you want 
   nmap <F5> :call CtrlKGoToDefinitionWithSplit('k')<CR>
   ```
 
+Experimental features
+---------------------
+1. CtrlK can show current function name in the status bar.
+To do that just add %{CtrlKGetCurrentScope()} into your status bar template. For example here's my status ber definition:
+
+  ```vim
+  hi User1 ctermbg=darkgreen ctermfg=black guibg=darkgreen guifg=black
+  hi User2 ctermbg=gray ctermfg=black guibg=gray  guifg=black
+  hi User3 ctermbg=darkgray ctermfg=gray  guibg=darkgray  guifg=gray
+
+  set statusline=%1*\ %{CtrlKGetCurrentScope()}\ %2*\ %F%m%r%h\ %w\ \ %3*\ %r%{getcwd()}%h%=%l:%c
+  ```
+Currently this feature only works for source (but not for header) files
+
+2. CtrlK can show an extra window that constanntly shows the definition of symbol under cursor. To enable this feature add the following line to your config:
+
+  ```vim
+  let g:ctrlk_follow_definition=1
+  ```
+
 Compilation database
 --------------------
 CtrlK uses compilation databases to parse your project. If you use CMake, creating the compilation database is just a matter of running:

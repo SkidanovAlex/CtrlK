@@ -53,10 +53,8 @@ function! ResetCtrlK()
 endfunction
 
 function! CtrlKGetCurrentScope()
-    if !exists('b:current_scope')
-        return ''
-    endif
-    return b:current_scope
+    python vim.command('let l:current_scope = "' + GetCurrentScopeStr() + '"')
+    return l:current_scope
 endfunction
 
 function! CtrlKGoToDefinition()
@@ -70,10 +68,10 @@ endfunction
 function! CtrlKGetReferences()
     python vim.command('let l:list = ' + json.dumps(FindReferences()))
     if !empty(l:list)
-        copen
-        call setqflist(l:list)
+        call setloclist(0, l:list)
+        lopen
     else
-        cclose
+        lclose
     endif
 endfunction
 
@@ -89,32 +87,39 @@ function! s:OnBufferUnload(fname)
     python CtrlKBufferUnload(vim.eval('a:fname'))
 endfunction
 
-function! s:UpdateCurrentScope()
-    python vim.command('let b:current_scope = "' + GetCurrentScopeStr() + '"')
-endfunction
-
 function! CtrlKStartFollowDefinition()
     rightbelow 20split
+    let s:lastFile = ''
     if !exists('w:ctrlkfl') | let w:ctrlkfl=1 | endif
 endfunction
 
+let g:lastFile = ''
 function CtrlKOpenFileInFollowWindow(fname, line)
-    let l:saved = winnr()
-    for winnr in range(1, winnr('$'))
-        if getwinvar(winnr, 'ctrlkfl') is 1
-            execute winnr."wincmd w"
-            if expand('%') != a:fname
-                execute 'edit '.a:fname
+    if exists("g:ctrlk_follow_definition") && g:ctrlk_follow_definition == 1
+        let l:saved = winnr()
+        for winnr in range(1, winnr('$'))
+            if getwinvar(winnr, 'ctrlkfl') is 1
+                if winnr == l:saved
+                    return
+                endif
+
+                execute winnr."wincmd w"
+                if g:lastFile != a:fname
+                    execute 'edit '.a:fname
+                    let g:lastFile = a:fname
+                endif
+                execute a:line
+                norm! zt
+                syntax enable
+                execute l:saved."wincmd w"
+                syntax enable
+                return
             endif
-            execute a:line
-            norm! zt
-            execute l:saved."wincmd w"
-            return
-        endif
-    endfor
-    call CtrlKStartFollowDefinition()
-    call CtrlKOpenFileInFollowWindow(a:fname, a:line)
-    execute l:saved."wincmd w"
+        endfor
+        call CtrlKStartFollowDefinition()
+        call CtrlKOpenFileInFollowWindow(a:fname, a:line)
+        execute l:saved."wincmd w"
+    endif
 endfunction
 
 function! s:CtrlKInitBuffer()
@@ -125,8 +130,7 @@ function! s:CtrlKInitBuffer()
         autocmd VimLeave * python LeaveCtrlK()
         au CursorHold,CursorHoldI,InsertLeave,BufEnter,BufRead,FileType <buffer> call <SID>ReadyToParse()
         au BufUnload <buffer> call <SID>OnBufferUnload(expand('<afile>:p'))
-"        au CursorMoved,CursorMovedI <buffer> call <SID>UpdateCurrentScope()
-"        autocmd CursorMoved,CursorMovedI <buffer> call CtrlKGoToDefinitionAndSplit('f')
+        autocmd CursorMoved,CursorMovedI * call CtrlKGoToDefinitionAndSplit('f')
     augroup END
 endfunction
 
