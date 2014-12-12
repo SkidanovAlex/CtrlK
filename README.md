@@ -23,12 +23,22 @@ Before installing the ctrlk plugin, you need to install ctrlk python library, as
   sudo pip install ctrlk
   ```
 
+The source code for ctrlk library is in its own git repo [py-ctrlk](https://github.com/SkidanovAlex/py-ctrlk)
+
 The easiest way to install CtrlK plugin itself is to use Vundle.
 
   ```vim
   Bundle 'L9'
   Bundle 'FuzzyFinder'
   Bundle 'SkidanovAlex/CtrlK'
+  ```
+
+Or, in the newer version or Vundle
+
+  ```vim
+  Plugin 'L9'
+  Plugin 'FuzzyFinder'
+  Plugin 'SkidanovAlex/CtrlK'
   ```
 
 Configuration
@@ -47,9 +57,9 @@ Set `g:ctrlk_clang_library_path` to your llvm lib folder (the folder that contai
 This maps Ctrl+k to open symbol navigation window, F2 to go to the current symbol's definition and F12 to show all the references to symbol under cursor.
 F3 is showing the current state of the indexer and background parsing thread in the form
 
-  ```Index: <status of the indexer> / Current: <status of the parsing thread>```
+  ```Index: <status of the indexer> / Current: <status of the parsing thread> / Jump: <any errors related to code navigation>```
 
-Note that CtrlK's indexer is rather slow. Indexing your project first time can take a considerable amount of time. Pressing F3 will tell you which file is being parsed right now. When all the files are parsed, F3 will print "Sleeping" as the indexer status.
+Note that CtrlK's indexer is rather slow. Indexing your project first time can take a considerable amount of time. Pressing F3 will tell you how many files are being parsed right now. When all the files are parsed, F3 will print "Parse queue size = 0" as the indexer status.
 
 With the bindings above F2 opens the definition in the same window. If you want to open the definition in a new window after a split or a vsplit, use the following bindings:
 
@@ -61,7 +71,8 @@ With the bindings above F2 opens the definition in the same window. If you want 
 Experimental features
 ---------------------
 1. CtrlK can show current function name in the status bar.
-To do that just add %{CtrlKGetCurrentScope()} into your status bar template. For example here's my status ber definition:
+
+To do that just add %{CtrlKGetCurrentScope()} into your status bar template. For example here's my status bar definition:
 
   ```vim
   hi User1 ctermbg=darkgreen ctermfg=black guibg=darkgreen guifg=black
@@ -85,4 +96,3 @@ CtrlK uses compilation databases to parse your project. If you use CMake, creati
   ```cmake . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON```
 
 When you run vim, CtrlK will find the compilation database file that is closest to the current folder, and place its own index next to it into a `.ctrlk` folder.
-

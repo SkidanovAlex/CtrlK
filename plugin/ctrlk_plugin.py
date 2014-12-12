@@ -9,8 +9,6 @@ import subprocess
 import sys
 import json
 
-from clang.cindex import Index, Config, TranslationUnitLoadError, CursorKind, File, SourceLocation, Cursor, TranslationUnit
-
 import requests
 from ctrlk import client_api
 from ctrlk import search
@@ -94,9 +92,6 @@ parseFile = ""
 parseContent = ""
 parseNeeded = False
 
-parseTus = {}
-parseScopeNames = {}
-
 def ParseCurrentFileThread():
     global parsingCurrentState
 
@@ -110,41 +105,12 @@ def ParseCurrentFileThread():
     except SystemExit as e:
         pass
 
-def PopulateScopeNames(cursor, scopeNames, scopeDepths, depth = 0):
-    if cursor is None:
-        return
-    for ch in cursor.get_children():
-        if ch.extent and ch.extent.start and ch.extent.end and cursor.extent and cursor.extent.end:
-            if str(ch.extent.end.file) == str(cursor.extent.end.file):
-                if ch.spelling is not None:
-                    for i in range(ch.extent.start.line, ch.extent.end.line + 1):
-                        while len(scopeNames) <= i:
-                            scopeNames.append('')
-                            scopeDepths.append(-1)
-
-                        if scopeDepths[i] < depth: 
-                            scopeDepths[i] = depth
-                            if scopeNames[i] != '': scopeNames[i] += '::'
-                            scopeNames[i] += ch.spelling
-
-                PopulateScopeNames(ch, scopeNames, scopeDepths, depth + 1)
-
-def GetCursorForFile(tu, fileName):
-    cursor = tu.cursor
-    if str(cursor.extent.start.file) == str(cursor.extent.end.file) and os.path.abspath(str(cursor.extent.start.file)) == fileName:
-        return cursor
-
-    # TODO
-    return None
-
 def ParseCurrentFile():
     global parseLock
     global parseFile
     global parseContent
     global parseNeeded
     global parseLastFile
-    global parseTus
-    global parseScopeNames
     global parsingCurrentState
 
     if not g_api:
@@ -168,20 +134,9 @@ def ParseCurrentFile():
         parsingCurrentState = "Can't find command line arguments"
         return
 
-    index = Index.create()
-    tu = index.parse(None, command + ["-I%s" % g_builtin_header_path], unsaved_files=[(fileToParse, contentToParse)], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
+    g_api.parse_current_file(command + ["-I%s" % g_builtin_header_path], fileToParse, contentToParse)
 
-    with parseLock:
-        parseTus[fileToParse] = tu
-        parsingCurrentState = "Partially parsed %s" % fileToParse
-
-    scopeNames = []
-    scopeDepths = []
-    PopulateScopeNames(GetCursorForFile(tu, os.path.abspath(fileToParse)), scopeNames, scopeDepths)
-
-    with parseLock:
-        parseScopeNames[fileToParse] = scopeNames
-        parsingCurrentState = "Fully parsed %s" % fileToParse
+    parsingCurrentState = "Sent %s for parsing" % fileToParse
 
 def RequestParse():
     global parseLock
@@ -195,127 +150,108 @@ def RequestParse():
             parseNeeded = True
 
 def CtrlKBufferUnload(s):
-    parseTus.pop(s, None)
+    if not g_api:
+        return
+    g_api.unload_current_file(s)
 
-def GetCurrentTranslationUnit():
-    global parseLock
-    global parseLastFile
-    global parseTus
-    with parseLock:
-        curName = vim.current.buffer.name
-        if curName is not None and curName in parseTus:
-            return parseTus[curName]
-        return None
-
-def GetCurrentUsrCursor(tu):
+def GetCurrentUsrCursor():
     line, col = vim.current.window.cursor
     col = col + 1
-    f = File.from_name(tu, vim.current.buffer.name)
-    loc = SourceLocation.from_position(tu, f, line, col)
-    cursor = Cursor.from_location(tu, loc)
-
-    while cursor is not None and (not cursor.referenced or not cursor.referenced.get_usr()):
-        nextCursor = cursor.lexical_parent
-        if nextCursor is not None and nextCursor == cursor:
-            return None
-        cursor = nextCursor
-    if cursor is None:
+    curName = vim.current.buffer.name
+    if curName is None:
         return None
-    return cursor.referenced
+    if not g_api:
+        return None
+    ret = g_api.get_usr_under_cursor(curName, line, col)
+    if ret == "":
+        return None
+    return ret
 
 def GoToDefinition(mode):
     global parsingCurrentState
 
     if not g_api:
         return
-    tu = GetCurrentTranslationUnit()
-    if tu is not None:
-        cursor = GetCurrentUsrCursor(tu)
-        if cursor is not None:
-            usr = cursor.get_usr()
-            try:
-                for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
-                    if int(v) < 0:
-                        if mode == 'j':
-                            vim.command('rightbelow split')
-                        elif mode == 'l':
-                            vim.command('rightbelow vsplit')
-                        if mode != 'f':
-                            JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
-                        else:
-                            FollowDef(search.extract_part(k, 2), int(search.extract_part(k, 3)))
-                        return
-            except Exception as e:
-                parsingCurrentState = str(e)
+    cursor = GetCurrentUsrCursor()
+    if cursor is not None:
+        usr = cursor['usr']
+        try:
+            for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
+                if int(v) < 0:
+                    if mode == 'j':
+                        vim.command('rightbelow split')
+                    elif mode == 'l':
+                        vim.command('rightbelow vsplit')
+                    if mode != 'f':
+                        JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
+                    else:
+                        FollowDef(search.extract_part(k, 2), int(search.extract_part(k, 3)))
+                    return
+        except Exception as e:
+            parsingCurrentState = str(e)
 
-            # For macros is_definition is always false => we always store their type as a positive number =>
-            #    condition in the loop above is always false. It is actually a good thing, because in case
-            #    of macros if several header files in the project declare the same macro, it will have the
-            #    same USR in all of them. When we want to go to definition, we want to go to the one which
-            #    is visible from the current location, which is exactly what cursor.location points right now,
-            #    so just use it instead of the project database.
-            # It is also a good fall back for the case when we cannot find someting in the database (file is
-            #    not parsed yet, or failed to parse) -- we will jump to the visible declaration of the symbol
-            #
-            if mode == 'j':
-                vim.command('rightbelow split')
-            elif mode == 'l':
-                vim.command('rightbelow vsplit')
-            if mode != 'f':
-                JumpTo(cursor.location.file, cursor.location.line, cursor.location.column)
-            else:
-                FollowDef(cursor.location.file, cursor.location.line)
-
-
+        # For macros is_definition is always false => we always store their type as a positive number =>
+        #    condition in the loop above is always false. It is actually a good thing, because in case
+        #    of macros if several header files in the project declare the same macro, it will have the
+        #    same USR in all of them. When we want to go to definition, we want to go to the one which
+        #    is visible from the current location, which is exactly what cursor.location points right now,
+        #    so just use it instead of the project database.
+        # It is also a good fall back for the case when we cannot find someting in the database (file is
+        #    not parsed yet, or failed to parse) -- we will jump to the visible declaration of the symbol
+        #
+        if mode == 'j':
+            vim.command('rightbelow split')
+        elif mode == 'l':
+            vim.command('rightbelow vsplit')
+        if mode != 'f':
+            JumpTo(cursor['file'], cursor['line'], cursor['column'])
+        else:
+            FollowDef(cursor['file'], cursor['line'])
 
 def FindReferences():
     global parsingCurrentState
     if not g_api:
         return
     ret = []
-    tu = GetCurrentTranslationUnit()
-    if tu is not None:
-        cursor = GetCurrentUsrCursor(tu)
-        if cursor is not None:
-            usr = cursor.get_usr()
-            try:
-                for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
-                    fileName = search.extract_part(k, 2)
-                    line = int(search.extract_part(k, 3))
-                    col = int(search.extract_part(k, 4))
+    cursor = GetCurrentUsrCursor()
+    if cursor is not None:
+        usr = cursor['usr']
+        try:
+            for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
+                fileName = search.extract_part(k, 2)
+                line = int(search.extract_part(k, 3))
+                col = int(search.extract_part(k, 4))
 
-                    kindText = search.get_reference_kind(int(v))
-                    text = "[   ]"
-                    if "DEFINITION" in kindText:
-                        text = "[DEF]"
-                    elif "declaration" in kindText:
-                        text = "[Dcl]"
-                    elif "reference" in kindText:
-                        text = "[ref]"
+                kindText = search.get_reference_kind(int(v))
+                text = "[   ]"
+                if "DEFINITION" in kindText:
+                    text = "[DEF]"
+                elif "declaration" in kindText:
+                    text = "[Dcl]"
+                elif "reference" in kindText:
+                    text = "[ref]"
 
-                    try:
-                        with open(fileName) as f:
-                            lines = [x for x in f]
-                        text += ' %s' % lines[line - 1].strip()
-                    except:
-                        pass
+                try:
+                    with open(fileName) as f:
+                        lines = [x for x in f]
+                    text += ' %s' % lines[line - 1].strip()
+                except:
+                    pass
 
-                    ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': text, 'kind': abs(int(v))})
-            except Exception as e:
-                parsingCurrentState = str(e)
+                ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': text, 'kind': abs(int(v))})
+        except Exception as e:
+            parsingCurrentState = str(e)
 
     return ret
 
 def GetCurrentScopeStr():
-    global parseLock
-    global parseLastFile
-    global parseTus
-    with parseLock:
-        curName = vim.current.buffer.name
-        line, col = vim.current.window.cursor
-        if curName is not None and curName in parseScopeNames and line < len(parseScopeNames[curName]):
-            return parseScopeNames[curName][line]
-        return "(no scope)"
+    if not g_api:
+        return
+    curName = vim.current.buffer.name
+    line, col = vim.current.window.cursor
+    if curName is not None:
+        return g_api.get_current_scope_str(curName, line)
+    return "(no scope)"
 
 def try_initialize(libraryPath):
     global g_api
@@ -337,9 +273,6 @@ def api_init_thread(libraryPath):
     global parsingCurrentState
     global updateProcess
     global updateFileProcess
-
-    Config.set_library_path(libraryPath)
-    Config.set_compatibility_check(False)
 
     if not try_initialize(libraryPath):
         server_path = ctrlk_server.get_absolute_path()
