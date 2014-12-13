@@ -88,8 +88,7 @@ function! s:OnBufferUnload(fname)
 endfunction
 
 function! CtrlKStartFollowDefinition()
-    rightbelow 12split
-    set winfixheight
+    rightbelow 20split
     let s:lastFile = ''
     if !exists('w:ctrlkfl') | let w:ctrlkfl=1 | endif
 endfunction
