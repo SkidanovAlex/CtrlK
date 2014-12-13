@@ -32,10 +32,11 @@ def UpdateCppIndexThread():
 
     try:
         while True:
-            queue_size = g_api.get_queue_size()
-            if queue_size <= 1:
-                g_api.parse()
-            parsingState = "Parse Queue Size = %d" % (queue_size)
+            if g_api is not None:
+                queue_size = g_api.get_queue_size()
+                if queue_size <= 1:
+                    g_api.parse()
+                parsingState = "Parse Queue Size = %d" % (queue_size)
             time.sleep(10)
     except Exception as e:
         parsingState = "Failed with %s" % (str(e))
@@ -105,7 +106,8 @@ def ParseCurrentFileThread():
             time.sleep(0.1)
             ParseCurrentFile()
     except Exception as e:
-        parsingCurrentState = "Failed with %s" % (traceback.format_exc(e))
+        with parseLock:
+            parsingCurrentState = "Failed with %s" % (traceback.format_exc(e))
         pass
     except SystemExit as e:
         pass
@@ -147,9 +149,6 @@ def ParseCurrentFile():
     global parseScopeNames
     global parsingCurrentState
 
-    if not g_api:
-        return
-
     with parseLock:
         if not parseNeeded:
             return
@@ -158,30 +157,47 @@ def ParseCurrentFile():
         parseNeeded = False
         parsingCurrentState = "Parsing %s" % fileToParse
 
+    command = None
     try:
-        command = g_api.get_file_args(fileToParse)
+        if g_api is not None:
+            command = g_api.get_file_args(fileToParse)
     except Exception as e:
-        parsingCurrentState = str(e)
+        with parseLock:
+            parsingCurrentState = str(e)
         return
 
+    parsingStatePrefix = ""
+    unsaved_files = [(fileToParse, contentToParse)]
     if command == None:
-        parsingCurrentState = "Can't find command line arguments"
-        return
+        if fileToParse.endswith(".h") or fileToParse.endswith(".hpp"):
+            unsaved_files.append(("temporary_source.cpp", "#include \"%s\"\n#include <stdint.h>\nint main() { return 0; }\n" % fileToParse))
+            command = ["g++", "temporary_source.cpp"]
+            parsingStatePrefix = "[HEADER] "
+        elif fileToParse.endswith(".cpp") or fileToParse.endswith(".cc") or fileToParse.endswith(".c") or fileToParse.endswith(".cxx"):
+            command = ["g++", fileToParse]
+            parsingStatePrefix = "[SOURCE] "
+        else:
+            with parseLock:
+                parsingCurrentState = "Can't find command line arguments"
+            return
 
     index = Index.create()
-    tu = index.parse(None, command + ["-I%s" % g_builtin_header_path], unsaved_files=[(fileToParse, contentToParse)], options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
+    tu = index.parse(None, command + ["-I%s" % g_builtin_header_path], unsaved_files=unsaved_files, options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
 
     with parseLock:
         parseTus[fileToParse] = tu
-        parsingCurrentState = "Partially parsed %s" % fileToParse
+        parsingCurrentState = "%sPartially parsed %s" % (parsingStatePrefix, fileToParse)
 
     scopeNames = []
     scopeDepths = []
+    # create a new tu so that we don't walk it from two different threads
+    index = Index.create()
+    tu = index.parse(None, command + ["-I%s" % g_builtin_header_path], unsaved_files=unsaved_files, options = TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
     PopulateScopeNames(GetCursorForFile(tu, os.path.abspath(fileToParse)), scopeNames, scopeDepths)
 
     with parseLock:
         parseScopeNames[fileToParse] = scopeNames
-        parsingCurrentState = "Fully parsed %s" % fileToParse
+        parsingCurrentState = "%sFully parsed %s" % (parsingStatePrefix, fileToParse)
 
 def RequestParse():
     global parseLock
@@ -195,7 +211,8 @@ def RequestParse():
             parseNeeded = True
 
 def CtrlKBufferUnload(s):
-    parseTus.pop(s, None)
+    with parseLock:
+        parseTus.pop(s, None)
 
 def GetCurrentTranslationUnit():
     global parseLock
@@ -226,27 +243,27 @@ def GetCurrentUsrCursor(tu):
 def GoToDefinition(mode):
     global parsingCurrentState
 
-    if not g_api:
-        return
     tu = GetCurrentTranslationUnit()
     if tu is not None:
         cursor = GetCurrentUsrCursor(tu)
         if cursor is not None:
             usr = cursor.get_usr()
             try:
-                for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
-                    if int(v) < 0:
-                        if mode == 'j':
-                            vim.command('rightbelow split')
-                        elif mode == 'l':
-                            vim.command('rightbelow vsplit')
-                        if mode != 'f':
-                            JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
-                        else:
-                            FollowDef(search.extract_part(k, 2), int(search.extract_part(k, 3)))
-                        return
+                if g_api is not None:
+                    for k, v in g_api.leveldb_search("s%%%" + usr + "%%%"):
+                        if int(v) < 0:
+                            if mode == 'j':
+                                vim.command('rightbelow split')
+                            elif mode == 'l':
+                                vim.command('rightbelow vsplit')
+                            if mode != 'f':
+                                JumpTo(search.extract_part(k, 2), int(search.extract_part(k, 3)), int(search.extract_part(k, 4)))
+                            else:
+                                FollowDef(search.extract_part(k, 2), int(search.extract_part(k, 3)))
+                            return
             except Exception as e:
-                parsingCurrentState = str(e)
+                with parseLock:
+                    parsingCurrentState = str(e)
 
             # For macros is_definition is always false => we always store their type as a positive number =>
             #    condition in the loop above is always false. It is actually a good thing, because in case
@@ -270,9 +287,9 @@ def GoToDefinition(mode):
 
 def FindReferences():
     global parsingCurrentState
-    if not g_api:
-        return
     ret = []
+    if not g_api:
+        return ret
     tu = GetCurrentTranslationUnit()
     if tu is not None:
         cursor = GetCurrentUsrCursor(tu)
@@ -302,7 +319,8 @@ def FindReferences():
 
                     ret.append({'filename': fileName, 'lnum': line, 'col': col, 'text': text, 'kind': abs(int(v))})
             except Exception as e:
-                parsingCurrentState = str(e)
+                with parseLock:
+                    parsingCurrentState = str(e)
 
     return ret
 
@@ -324,6 +342,7 @@ def try_initialize(libraryPath):
     try:
         g_api = client_api.CtrlKApi()
         g_api.register(libraryPath, os.path.abspath(os.getcwd()))
+        parsingState = "Ready to parse"
         return True
     except Exception as e:
         g_api = None
@@ -341,6 +360,9 @@ def api_init_thread(libraryPath):
     Config.set_library_path(libraryPath)
     Config.set_compatibility_check(False)
 
+    parsingState = "Initializing"
+    parsingCurrentState = "Initializing"
+
     if not try_initialize(libraryPath):
         server_path = ctrlk_server.get_absolute_path()
         with open('/tmp/ctrlk_server_stdout', 'a') as server_stdout:
@@ -348,16 +370,17 @@ def api_init_thread(libraryPath):
                 subprocess.Popen(['python', server_path, '--port', str(client_api.DEFAULT_PORT), '--suicide-seconds', '3600'],\
                         stdout=server_stdout, stderr=server_stderr)
 
-        for i in range(100):
+        for i in range(30):
             if try_initialize(libraryPath):
                 break
             time.sleep(0.1)
         else:
-            return
+            parsingState = "Failed to initialize"
+            pass
     
-    g_builtin_header_path = g_api.get_builtin_header_path()
+    if g_api is not None:
+        g_builtin_header_path = g_api.get_builtin_header_path()
 
-    parsingState = "Ready to parse"
     parsingCurrentState = "Ready to parse"
 
     if updateProcess == None:
@@ -380,4 +403,5 @@ def LeaveCtrlK():
 def GetCtrlKState():
     global parsingState
     global parsingCurrentState
-    print "Index: %s / Current: %s / Jump: %s" % (parsingState, parsingCurrentState, jumpState)
+    with parseLock:
+        print "Index: %s / Current: %s / Jump: %s" % (parsingState, parsingCurrentState, jumpState)

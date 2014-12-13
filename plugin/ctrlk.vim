@@ -88,7 +88,8 @@ function! s:OnBufferUnload(fname)
 endfunction
 
 function! CtrlKStartFollowDefinition()
-    rightbelow 20split
+    rightbelow 12split
+    set winfixheight
     let s:lastFile = ''
     if !exists('w:ctrlkfl') | let w:ctrlkfl=1 | endif
 endfunction
@@ -96,6 +97,10 @@ endfunction
 let g:lastFile = ''
 function CtrlKOpenFileInFollowWindow(fname, line)
     if exists("g:ctrlk_follow_definition") && g:ctrlk_follow_definition == 1
+        if mode()=~#"^[vV\<C-v>]" 
+            " do nothing in visual mode
+            return
+        endif
         let l:saved = winnr()
         for winnr in range(1, winnr('$'))
             if getwinvar(winnr, 'ctrlkfl') is 1
